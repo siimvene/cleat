@@ -259,6 +259,26 @@ try:
     else:
         check("lizard is not installed, so exclude_except is not exercised against a real run", True)
 
+    # --- --only keeps to the configured sources: a changed file outside them is not judged.
+    if shutil.which("lizard"):
+        only_src = os.path.join(tmp, "apps", "svc", "src")
+        inside = os.path.join(only_src, "inside.py")
+        outside = os.path.join(tmp, "apps", "svc", "tests", "outside.py")
+        write(inside, "def inside_fn(a):\n" + branchy_body)
+        write(outside, "def outside_fn(a):\n" + branchy_body)
+        only_config = os.path.join(tmp, "only-quality.json")
+        write(only_config, json.dumps({"complexity": {
+            "sources": ["apps/svc/src"], "languages": ["python"], "exclude": [],
+            "ceilings": {"cc": 8, "lines": 60}, "baseline": "only-baseline.json"}}))
+        write(os.path.join(tmp, "only-baseline.json"), json.dumps({"provenance": {}, "entries": []}))
+        code, out = run(only_config, "--only", "apps/svc/tests/outside.py")
+        check("--only over a changed file outside every source judges nothing", code == 0 and "outside_fn" not in out, out)
+        code, out = run(only_config, "--only", "apps/svc/src/inside.py", "apps/svc/tests/outside.py")
+        check("--only over a changed file inside a source still judges it", code == 1 and "inside_fn" in out, out)
+        check("and still leaves the one outside alone", "outside_fn" not in out, out)
+    else:
+        check("lizard is not installed, so --only's scoping is not exercised against a real run", True)
+
     # --- Against this checkout, when it configures the section and lizard is installed.
     repo = os.path.dirname(os.path.dirname(HERE))
     checkout_config = os.path.join(repo, "quality.json")

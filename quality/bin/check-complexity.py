@@ -96,10 +96,20 @@ def read_functions(args, name, section, config):
             return complexity.functions_from_swiftlint(json.load(handle)), 0, "swiftlint", None
     roots = config.paths(config.get(name, "sources"))
     if args.only is not None:
-        roots = [config.path(f) for f in args.only if os.path.isfile(config.path(f))]
+        roots = only_roots(args.only, roots, config)
         if not roots:
             return [], 0, complexity.tool_of(section), None
     return complexity.measure(section, roots, config.paths(section.get("exclude_except", [])))
+
+
+def only_roots(only, sources, config):
+    """The `--only` files worth measuring: those on disk and under a configured source.
+    A changed file outside every source — a test tree, tooling the config never
+    named — has no baseline entries because it was never measured, and judging
+    it here would read all of its standing debt as new."""
+    inside = [os.path.join(os.path.realpath(root), "") for root in sources]
+    files = (config.path(p) for p in only)
+    return [f for f in files if os.path.isfile(f) and any(os.path.realpath(f).startswith(r) for r in inside)]
 
 
 
