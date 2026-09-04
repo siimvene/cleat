@@ -4,7 +4,7 @@ Newest first. A line per gate or behavior change; policy changes to this reposit
 
 ## Unreleased
 
-- `--only` (what `gate.py --changed` hands the scoped gates) keeps to the configured sources: a changed file outside every source — a test tree, tooling the config never named — was measured with no baseline entries to match, so all of its standing debt read as new and the Stop hook refused every stop on a branch that touched one. Complexity now drops such files before measuring; a test pins it.
+- `--only` (what `gate.py --changed` hands the scoped gates) keeps to the configured sources: a changed file outside every source — a test tree, tooling the config never named — was measured with no baseline entries to match, so all of its standing debt read as new and the Stop hook refused every stop on a branch that touched one. The same for a file of a language the section does not read (a shell script under a source configured for Python), which lizard measures when handed the path outright. Complexity now drops both before measuring; tests pin each.
 - New gates: conventions (a project's own rules as regexes with a message at the site, ratcheted by site) and dead-symbols (declared names nothing references, through ast-grep; a report by default).
 - `gate.py --changed` scopes complexity, escapes, conventions and duplication to the files changed against the base; the Stop hook attach writes uses it, CI still runs everything.
 - Mutation: a filtered (narrow) suite run that executed no tests is inconclusive, not survival; the full suite decides. It made CI flaky on Linux, where the filter sometimes matched nothing.

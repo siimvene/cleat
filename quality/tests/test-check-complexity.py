@@ -276,6 +276,11 @@ try:
         code, out = run(only_config, "--only", "apps/svc/src/inside.py", "apps/svc/tests/outside.py")
         check("--only over a changed file inside a source still judges it", code == 1 and "inside_fn" in out, out)
         check("and still leaves the one outside alone", "outside_fn" not in out, out)
+        script = os.path.join(only_src, "tool.sh")
+        write(script, "tool_fn() {\n" + "\n".join("  if [ $1 = %d ]; then echo %d; fi" % (i, i) for i in range(12)) + "\n}\n")
+        code, out = run(only_config, "--only", "apps/svc/src/tool.sh")
+        check("--only over a changed file of a language the section does not read judges nothing",
+              code == 0 and "tool_fn" not in out, out)
     else:
         check("lizard is not installed, so --only's scoping is not exercised against a real run", True)
 
