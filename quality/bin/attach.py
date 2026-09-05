@@ -413,6 +413,16 @@ def vendor(plan, dry_run, do_refresh=False):
         plan.say("quality/", "kept (already there — --refresh replaces the template's files)")
 
 
+# The gate script, resolved from the project's git top level rather than the
+# working directory: a hook runs in the tool shell's current directory, which
+# keeps the agent's last `cd`, and a relative path then fails to start — and
+# Claude Code reads a hook that failed to start as a denial of the call. Seen
+# as "permission denied" on every Bash, Edit and Write in two projects' agent
+# runs on 2026-09-05. CLAUDE_PROJECT_DIR is what Claude Code hands every hook;
+# the git top level covers a session started in a subdirectory of it.
+GATE_IN_HOOK = ('python3 "$(git -C "${CLAUDE_PROJECT_DIR:-.}" rev-parse --show-toplevel 2>/dev/null '
+                '|| printf %s "${CLAUDE_PROJECT_DIR:-.}")/quality/bin/gate.py"')
+
 def merge_settings(plan, dry_run):
     """Add the Stop and PreToolUse hooks to .claude/settings.json, keeping what is there."""
     rel = os.path.join(".claude", "settings.json")
@@ -422,9 +432,9 @@ def merge_settings(plan, dry_run):
         with open(path) as handle:
             settings = json.load(handle)
     hooks = settings.setdefault("hooks", {})
-    stop = {"hooks": [{"type": "command", "command": "python3 quality/bin/gate.py --hook --changed"}]}
+    stop = {"hooks": [{"type": "command", "command": GATE_IN_HOOK + " --hook --changed"}]}
     guard = {"matcher": "Bash|Edit|Write|MultiEdit",
-             "hooks": [{"type": "command", "command": "python3 quality/bin/gate.py --guard"}]}
+             "hooks": [{"type": "command", "command": GATE_IN_HOOK + " --guard"}]}
     changed = False
     for event, entry in (("Stop", stop), ("PreToolUse", guard)):
         existing = hooks.setdefault(event, [])

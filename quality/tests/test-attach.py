@@ -87,9 +87,13 @@ try:
     check("the existing settings are kept", settings["permissions"]["allow"] == ["Bash(ls:*)"], str(settings))
     stop = json.dumps(settings["hooks"].get("Stop"))
     pre = json.dumps(settings["hooks"].get("PreToolUse"))
-    check("the Stop hook runs the gates in hook mode", "gate.py --hook" in stop, stop)
+    stop_cmd = " ".join(h["command"] for e in settings["hooks"].get("Stop", []) for h in e.get("hooks", []))
+    check("the Stop hook runs the gates in hook mode, with the script anchored on the project top level",
+          'gate.py" --hook' in stop_cmd and "CLAUDE_PROJECT_DIR" in stop_cmd and "rev-parse --show-toplevel" in stop_cmd, stop_cmd)
     check("the run registry and the event log are gitignored", all(e in read(os.path.join(root, ".gitignore")) for e in ("quality/.running/", "quality/.events.jsonl")), read(os.path.join(root, ".gitignore")))
-    check("the PreToolUse guard is wired for the tools that change files", "gate.py --guard" in pre and "Bash" in pre and "Edit" in pre, pre)
+    pre_cmd = " ".join(h["command"] for e in settings["hooks"].get("PreToolUse", []) for h in e.get("hooks", []))
+    check("the PreToolUse guard is wired for the tools that change files, anchored the same way",
+          'gate.py" --guard' in pre_cmd and "CLAUDE_PROJECT_DIR" in pre_cmd and "Bash" in pre and "Edit" in pre, pre_cmd)
     claude_md = read(os.path.join(root, "CLAUDE.md"))
     check("the agent block is appended to CLAUDE.md, after what was there", claude_md.startswith("# Project") and "## Quality gates (cleat)" in claude_md and "--write-baseline" in claude_md, claude_md)
     check("the workflow runs the gates under --strict", "gate.py --strict" in read(os.path.join(root, ".github", "workflows", "cleat.yml")))
