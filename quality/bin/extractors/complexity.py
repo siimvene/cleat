@@ -102,6 +102,7 @@ def _lizard(paths, languages, excludes, root=None):
         command += ["-l", language]
     for pattern in excludes:
         command += ["-x", pattern]
+    command.append("--")  # a root-relative path may begin with "-"; without this lizard reads it as a flag
     if root:
         root = os.path.realpath(root)
         command += [os.path.relpath(os.path.realpath(p), root) for p in paths]

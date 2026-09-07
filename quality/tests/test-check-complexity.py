@@ -267,13 +267,15 @@ try:
         under_tmp = os.path.join(tmp, "tmp", "proj")
         write(os.path.join(under_tmp, "src", "deep.py"), "def deep_fn(a):\n" + branchy_body)
         write(os.path.join(under_tmp, "tmp", "scratch.py"), "def scratch_fn(a):\n" + branchy_body)
+        write(os.path.join(under_tmp, "-dash", "d.py"), "def dash_fn(a):\n" + branchy_body)
         ut_config = os.path.join(under_tmp, "quality.json")
         write(ut_config, json.dumps({"complexity": {
-            "sources": ["src", "tmp"], "languages": ["python"], "exclude": ["*/tmp/*", "tmp/*"],
+            "sources": ["src", "tmp", "-dash"], "languages": ["python"], "exclude": ["*/tmp/*", "tmp/*"],
             "ceilings": {"cc": 8, "lines": 60}, "baseline": "ut-baseline.json"}}))
         code, out = run(ut_config)
         check("a checkout under a directory named tmp still judges its sources", "deep.py" in out, out)
         check("the tree's own tmp directory is still excluded", "scratch.py" not in out, out)
+        check("a root-relative source beginning with - is a path to lizard, not a flag", "d.py" in out, out)
     else:
         check("lizard is not installed, so root-relative excludes are not exercised", True)
 
