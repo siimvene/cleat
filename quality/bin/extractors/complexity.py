@@ -139,7 +139,7 @@ def run_lizard(sources, languages, excludes, exclude_except=None, root=None):
     a second pass over exactly those paths with no exclude at all. Raises ToolError."""
     if not shutil.which("lizard"):
         raise ToolError("lizard is not installed — brew install lizard (or pip install lizard)")
-    output = _lizard_csv(sources, languages, excludes, root)
+    output = _lizard_csv(sources, languages, excludes, root) if sources else ""
     if exclude_except:
         output += _lizard_csv(exclude_except, languages, [], root)
     return output

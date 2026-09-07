@@ -256,6 +256,11 @@ try:
         code, out = run(ee_config)
         check("a file matched by exclude and named in exclude_except is judged", "keep-test-tool.py" in out, out)
         check("a file matched by exclude alone is still not judged", "other-test-thing.py" not in out, out)
+        code, out = run(ee_config, "--only", "apps/cli/src/keep-test-tool.py")
+        check("a scoped run whose only changed file is an exclude_except file still judges it", "keep-test-tool.py" in out, out)
+        check("and judges it once", out.count("keep-test-tool.py") == 1, out)
+        code, out = run(ee_config, "--only", "apps/cli/src/keep-test-tool.py", "apps/cli/src/other-test-thing.py")
+        check("a scoped run keeps the exclude_except file and drops the excluded one", "keep-test-tool.py" in out and "other-test-thing.py" not in out, out)
     else:
         check("lizard is not installed, so exclude_except is not exercised against a real run", True)
 

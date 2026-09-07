@@ -95,11 +95,20 @@ def read_functions(args, name, section, config):
         with open(args.lint) as handle:
             return complexity.functions_from_swiftlint(json.load(handle)), 0, "swiftlint", None
     roots = config.paths(config.get(name, "sources"))
+    excepted = config.paths(section.get("exclude_except", []))
     if args.only is not None:
-        roots = scoped_sources(args.only, section.get("exclude", []), config)
-        if not roots:
+        roots, excepted = scoped_passes(args.only, section, config, excepted)
+        if not roots and not excepted:
             return [], 0, complexity.tool_of(section), None
-    return complexity.measure(section, roots, config.paths(section.get("exclude_except", [])), root=config.root)
+    return complexity.measure(section, roots, excepted, root=config.root)
+
+
+def scoped_passes(only, section, config, excepted):
+    """(sources, exclude_except) for a scoped run: the changed files the globs keep, and the
+    changed files `exclude_except` names, each for its own lizard pass."""
+    changed = {os.path.abspath(config.path(f)) for f in only}
+    return (scoped_sources(only, section.get("exclude", []), config),
+            [p for p in excepted if os.path.abspath(p) in changed])
 
 
 def scoped_sources(only, exclude, config):
@@ -109,7 +118,9 @@ def scoped_sources(only, exclude, config):
     file the full run excludes. A glob is matched the way the full run's walk spells the
     path: relative to the root, with and without the leading `./` lizard's walk over "."
     adds; never against the absolute path, or a checkout under /tmp would match `*/tmp/*`
-    and the scoped run would judge nothing. `exclude_except` files keep their own pass."""
+    and the scoped run would judge nothing. A changed `exclude_except` file is dropped here
+    too (its glob matches) and judged by its own no-exclude pass, once, as the full run
+    does; the caller narrows that pass to the changed ones."""
     kept = []
     for f in only:
         path = config.path(f)
