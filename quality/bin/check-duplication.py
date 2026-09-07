@@ -97,22 +97,40 @@ def _flat(lines):
     return "".join(text.translate(_DROP) for _, text in lines)
 
 
-def already_at_base(clone, config, base, skip_rust_tests=True):
+def already_at_base(clone, config, base, skip_rust_tests=True, cache=None):
     """Whether the base already held every copy of `clone`: each copy's significant text,
     whitespace removed, is a substring of the base version of its file, read the same way.
     A formatter that joined or split the copy's lines changed every one of them (so the
     clone touches the diff) but wrote no new block: that is the debt the density baseline
     already holds, not a twin the agent just made. A copy in a file the base lacks, a copy
     moved between files, or one the formatter rewrote beyond whitespace and brackets (quote
-    style, say) reads as new and is reported; the residue is small and errs toward reporting."""
+    style, say) reads as new and is reported; that residue errs toward reporting. The
+    other way round, the flattened text has no line separators (a join must still match),
+    so a block whose characters happen to run together elsewhere in the base file would be
+    held; at six or more significant lines that is the block itself. `cache` holds each
+    file's flattened base and working text for the run: one `git show` per file, not per
+    copy."""
+    cache = {} if cache is None else cache
     for path, start, end in clone.locations:
-        text = changed.base_text(config.root, base, path)
-        if text is None:
-            return False
-        copy = [l for l in duplication.significant_in(config.path(path), skip_rust_tests) if start <= l[0] <= end]
-        if _flat(copy) not in _flat(duplication.significant(text)):
+        held = _flat_base(path, config, base, cache)
+        if held is None or _flat(_copy_lines(path, start, end, config, skip_rust_tests, cache)) not in held:
             return False
     return True
+
+
+def _flat_base(path, config, base, cache):
+    """The flattened base text of `path`, None when the base lacks the file; one git read per file."""
+    if ("base", path) not in cache:
+        text = changed.base_text(config.root, base, path)
+        cache["base", path] = None if text is None else _flat(duplication.significant(text))
+    return cache["base", path]
+
+
+def _copy_lines(path, start, end, config, skip_rust_tests, cache):
+    """The significant lines of the working-tree copy at `path`:`start`-`end`; one file read per file."""
+    if ("tree", path) not in cache:
+        cache["tree", path] = duplication.significant_in(config.path(path), skip_rust_tests)
+    return [l for l in cache["tree", path] if start <= l[0] <= end]
 
 
 def judge_changed(clones, config, base, skip_rust_tests=True):
@@ -124,7 +142,8 @@ def judge_changed(clones, config, base, skip_rust_tests=True):
     except changed.ChangedError:
         return [], 0, 0
     touching = [c for c in clones if c.touches(lines)]
-    new = [c for c in touching if not already_at_base(c, config, base, skip_rust_tests)]
+    cache = {}
+    new = [c for c in touching if not already_at_base(c, config, base, skip_rust_tests, cache)]
     return new, sum(len(v) for v in lines.values()), len(touching) - len(new)
 
 

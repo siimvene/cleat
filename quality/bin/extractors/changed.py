@@ -7,14 +7,15 @@ the default branch, else HEAD — so on the default branch with nothing pushed
 base to the working tree, plus every line of every untracked file, as
 {repo-relative path: set of line numbers}.
 
-Whitespace is not a change: the diff runs with `--ignore-all-space`, so a
-line a formatter reflowed, re-indented or re-spaced is not "changed" and a
-format-only commit changes nothing. Before, a formatter pass over a tree
-marked every line it touched, and the duplication gate reported every
-pre-existing clone under those lines as new (25 pairs on one pilot branch,
-none introduced by it). A line the formatter joined or split is still a
-change, as it should be. The gates this scopes key on functions, sites and
-clones, none of which an indentation-only edit moves.
+Whitespace still counts: an indentation-only edit is a change (in Python it
+moves a line in or out of a block), so the diff is a plain one, and a
+formatter's work reads as changed lines. What a gate makes of a reformatted
+line is that gate's call (the duplication gate asks the base whether the
+block was already there, see check-duplication.py).
+
+The base is repo-chosen (`base_ref` in quality.json, a branch name) and a
+value beginning with `-` would reach git as an option (`--output=` writes
+files), so every call that takes it passes `--end-of-options` first.
 """
 
 import os
@@ -22,7 +23,7 @@ import re
 import subprocess
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-DIFF_FLAGS = ("-U0", "--no-color", "--no-ext-diff", "--ignore-all-space")
+DIFF_FLAGS = ("-U0", "--no-color", "--no-ext-diff", "--end-of-options")
 
 
 class ChangedError(Exception):
@@ -30,7 +31,7 @@ class ChangedError(Exception):
 
 
 def _git(repo, *args):
-    proc = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    proc = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, errors="replace")
     return proc.returncode, proc.stdout
 
 
@@ -80,8 +81,9 @@ def _untracked(repo, changed):
 
 def base_text(repo, base, path):
     """The text of repo-relative `path` as `base` had it, or None when the base has no
-    such file (a new file, or a tree that is not a repository)."""
-    code, out = _git(repo, "show", "%s:%s" % (base, path))
+    such file (a new file, or a tree that is not a repository). Bytes that are not
+    UTF-8 are replaced, as the working-tree readers do."""
+    code, out = _git(repo, "show", "--end-of-options", "%s:%s" % (base, path))
     return out if code == 0 else None
 
 

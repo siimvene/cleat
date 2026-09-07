@@ -88,15 +88,27 @@ try:
     lines = changed.changed_lines(repo, changed.base_ref(repo))
     check("changed lines come from the diff against the base", lines.get("src/c.py") == set(range(6, 19)), str(lines))
     git(repo, "checkout", "-q", "--", "src/c.py")
-    # a formatter pass: the same lines re-spaced and re-indented, one line genuinely changed
-    write(a, "def total_a(items):\n  total   =  0\n" + BLOCK.replace("    total = total", "  total=total") + "  return total\n")
+    # a formatter pass: both copies re-indented and re-spaced, one line elsewhere genuinely changed
+    write(a, "def total_a(items):\n  total   =  0\n" + BLOCK.replace("    total", "  total") + "  return total\n")
+    write(b, "def total_b(items):\n  total   =  0\n" + BLOCK.replace("    total", "  total") + "  return total\n")
     write(c, "def other():\n    x = 1\n    y = 2\n    z = 3\n    return x + y + z + 1\n")
     lines = changed.changed_lines(repo, "HEAD")
-    check("a whitespace-only rewrite is not a change", "src/a.py" not in lines, str(lines))
-    check("while a real edit on the same tree still is", lines.get("src/c.py") == {5}, str(lines))
+    check("a whitespace-only rewrite is still a change (indentation moves a line in Python)", lines.get("src/a.py") == set(range(2, 12)), str(lines))
+    check("and a real edit on the same tree is one", lines.get("src/c.py") == {5}, str(lines))
     code, out = run(config)
-    check("so the clone under the reformatted lines is not reported as new", code == 0 and "the block has a twin" not in out and "none overlap the 1 changed line(s)" in out, out)
-    git(repo, "checkout", "-q", "--", "src/a.py", "src/c.py")
+    check("but the clone under the re-spaced lines is one the base already held, not a new one", code == 0 and "the block has a twin" not in out and "1 clone pair(s) under changed lines already had every copy at the base" in out, out)
+    git(repo, "checkout", "-q", "--", "src/a.py", "src/b.py", "src/c.py")
+    # a base is repo-chosen (quality.json base_ref); one shaped like an option must not reach git as one
+    pwned = os.path.join(tmp, "pwned")
+    # a root-level path: with a directory in it git could not create "<pwned>:src/a.py" either way, and the case could not fail
+    check("a flag-shaped base reads no blob and writes no file", changed.base_text(repo, "--output=" + pwned, "quality.json") is None and not os.path.exists(pwned + ":quality.json") and not os.path.exists(pwned), str(os.listdir(tmp)))
+    changed.changed_lines(repo, "--output=" + pwned)
+    check("nor does a flag-shaped base to the diff", not os.path.exists(pwned), str(os.listdir(tmp)))
+    with open(os.path.join(repo, "src", "latin.py"), "wb") as handle:
+        handle.write(b'x = "caf\xe9"\n')
+    git(repo, "add", "src/latin.py")
+    git(repo, "commit", "-q", "-m", "latin-1")
+    check("a base blob that is not UTF-8 is read with replacement, not a traceback", "caf" in (changed.base_text(repo, "HEAD", "src/latin.py") or ""), repr(changed.base_text(repo, "HEAD", "src/latin.py")))
     write(os.path.join(repo, "src", "new.py"), "x = 1\ny = 2\n")
     lines = changed.changed_lines(repo, "HEAD")
     check("an untracked file counts as changed in full", lines.get("src/new.py") == {1, 2, 3}, str(lines))
