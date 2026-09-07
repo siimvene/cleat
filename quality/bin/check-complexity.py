@@ -99,7 +99,7 @@ def read_functions(args, name, section, config):
         roots = [config.path(f) for f in args.only if os.path.isfile(config.path(f))]
         if not roots:
             return [], 0, complexity.tool_of(section), None
-    return complexity.measure(section, roots, config.paths(section.get("exclude_except", [])))
+    return complexity.measure(section, roots, config.paths(section.get("exclude_except", [])), root=config.root)
 
 
 

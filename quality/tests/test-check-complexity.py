@@ -259,6 +259,24 @@ try:
     else:
         check("lizard is not installed, so exclude_except is not exercised against a real run", True)
 
+    # --- an exclude glob matches the path as the repository knows it, not the checkout's
+    # absolute path: a tree under a directory literally named tmp, excluding "*/tmp/*", still
+    # judges its own sources (a checkout under /tmp or .claude/worktrees used to match the
+    # glob on its prefix, judge nothing and pass), while the tree's own tmp stays excluded.
+    if shutil.which("lizard"):
+        under_tmp = os.path.join(tmp, "tmp", "proj")
+        write(os.path.join(under_tmp, "src", "deep.py"), "def deep_fn(a):\n" + branchy_body)
+        write(os.path.join(under_tmp, "tmp", "scratch.py"), "def scratch_fn(a):\n" + branchy_body)
+        ut_config = os.path.join(under_tmp, "quality.json")
+        write(ut_config, json.dumps({"complexity": {
+            "sources": ["src", "tmp"], "languages": ["python"], "exclude": ["*/tmp/*", "tmp/*"],
+            "ceilings": {"cc": 8, "lines": 60}, "baseline": "ut-baseline.json"}}))
+        code, out = run(ut_config)
+        check("a checkout under a directory named tmp still judges its sources", "deep.py" in out, out)
+        check("the tree's own tmp directory is still excluded", "scratch.py" not in out, out)
+    else:
+        check("lizard is not installed, so root-relative excludes are not exercised", True)
+
     # --- Against this checkout, when it configures the section and lizard is installed.
     repo = os.path.dirname(os.path.dirname(HERE))
     checkout_config = os.path.join(repo, "quality.json")

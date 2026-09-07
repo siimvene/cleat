@@ -214,7 +214,7 @@ def complexities_for(args, settings):
         if settings.has("complexity", "tool") and settings.value(None, "complexity", "tool") == "lizard":
             spec = settings.value(None, "complexity")
             return complexity_readers.lizard_complexities(settings.config.paths(spec["sources"]), spec["languages"],
-                                                          spec.get("exclude", []), spec.get("skip_rust_tests", True))
+                                                          spec.get("exclude", []), spec.get("skip_rust_tests", True), root=settings.config.root)
         return complexity_readers.swiftlint_complexities(settings.config.paths(settings.value(None, "sources")))
     except complexity_readers.ToolError as problem:
         raise GateError(str(problem))
