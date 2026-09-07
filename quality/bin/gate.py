@@ -267,15 +267,16 @@ def changed_files(root):
         files = sorted(changed.changed_lines(root, changed.base_ref(root)))
     except changed.ChangedError:
         return []
-    # A path that begins with "-" would be parsed as a FLAG by the scoped checks
-    # (they take `--only FILE...`), so a file named `--write-baseline` in the change
-    # set would rewrite the baselines from the Stop hook — the exact policy change
-    # the guard exists to refuse. Refuse the scoped run instead; the fix is a rename.
-    flagged = [f for f in files if f.startswith("-")]
-    if flagged:
-        sys.exit("gate: refusing --changed: %d changed path(s) begin with '-' and would parse as "
-                 "flags in the scoped checks; rename them: %s" % (len(flagged), " ".join(flagged)))
     return files
+
+
+def flag_shaped(files):
+    """The changed paths that begin with "-" — they would be parsed as FLAGS by the
+    scoped checks (which take `--only FILE...`), so a file named `--write-baseline` in
+    the change set would rewrite the baselines from the Stop hook, the exact policy
+    change the guard exists to refuse. The caller refuses the scoped run; the fix is a
+    rename."""
+    return [f for f in files if f.startswith("-")]
 
 
 def run_all(gates, config_path, strict, skip_missing=False, config=None, changed_only=None):
@@ -436,6 +437,14 @@ def main():
     if not gates:
         return fail("%s configures no gate — see quality/README.md" % config.file)
     scope = changed_files(config.root) if args.changed else None
+    flagged = flag_shaped(scope or [])
+    if flagged:
+        # In hook mode the Stop hook's contract is exit 2 ("not done", stderr to the
+        # agent); exit 1 would let the agent stop with the whole pass skipped.
+        sys.stderr.write("gate: refusing --changed: %d changed path(s) begin with '-' and would "
+                         "parse as flags in the scoped checks; rename them: %s\n"
+                         % (len(flagged), " ".join(flagged)))
+        return 2 if args.hook else 1
     with runlock.held(os.path.dirname(HERE), "gate.py"):
         failures = run_all(gates, config.file, args.strict, args.skip_missing_tools, config, scope)
     return finish(failures, args.hook, config.root)
