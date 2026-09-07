@@ -406,6 +406,24 @@ def finish(failures, hook, root=None):
     return 0 if again else 2
 
 
+def scope_of(args, root):
+    """(the files the heavy gates are scoped to — None for the full pass, an exit code or
+    None): under --changed, a changed path beginning with '-' would parse as a flag in the
+    scoped checks, so the run is refused naming the paths. In hook mode the Stop hook's
+    contract is exit 2 ("not done", stderr to the agent); exit 1 would let the agent stop
+    with the whole pass skipped."""
+    if not args.changed:
+        return None, None
+    scope = changed_files(root)
+    flagged = flag_shaped(scope or [])
+    if not flagged:
+        return scope, None
+    sys.stderr.write("gate: refusing --changed: %d changed path(s) begin with '-' and would "
+                     "parse as flags in the scoped checks; rename them: %s\n"
+                     % (len(flagged), " ".join(flagged)))
+    return None, 2 if args.hook else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="run every gate quality.json configures")
     parser.add_argument("--strict", action="store_true", help="a baseline looser than the code fails too (CI)")
@@ -436,15 +454,9 @@ def main():
         return 0
     if not gates:
         return fail("%s configures no gate — see quality/README.md" % config.file)
-    scope = changed_files(config.root) if args.changed else None
-    flagged = flag_shaped(scope or [])
-    if flagged:
-        # In hook mode the Stop hook's contract is exit 2 ("not done", stderr to the
-        # agent); exit 1 would let the agent stop with the whole pass skipped.
-        sys.stderr.write("gate: refusing --changed: %d changed path(s) begin with '-' and would "
-                         "parse as flags in the scoped checks; rename them: %s\n"
-                         % (len(flagged), " ".join(flagged)))
-        return 2 if args.hook else 1
+    scope, refused = scope_of(args, config.root)
+    if refused:
+        return refused
     with runlock.held(os.path.dirname(HERE), "gate.py"):
         failures = run_all(gates, config.file, args.strict, args.skip_missing_tools, config, scope)
     return finish(failures, args.hook, config.root)
