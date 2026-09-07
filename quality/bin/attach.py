@@ -413,8 +413,41 @@ def vendor(plan, dry_run, do_refresh=False):
         plan.say("quality/", "kept (already there — --refresh replaces the template's files)")
 
 
+GUARDED_TOOLS = ("Bash", "Edit", "Write")
+
+
+def invoked(command, mode):
+    """Whether `command` actually runs gate.py in `mode`: as the command, or after `;`, `&&`,
+    `then` or `do` — a PATH prefix or an existence guard around it still counts. Not after
+    `||`, inside a comment, or as the argument of echo: a string that only mentions the
+    gate must not pass for a hook that runs it."""
+    return re.search(r"(?:^|;|&&|\bthen|\bdo)\s*(?:PATH=\S+;?\s*)?python3?\s+\S*gate\.py\s+%s\b" % re.escape(mode),
+                     command) is not None
+
+
+def covers(entry, tools):
+    """Whether a hook entry's matcher reaches every tool in `tools` (no matcher: every tool)."""
+    matcher = entry.get("matcher")
+    return not tools or not matcher or all(t in matcher.split("|") for t in tools)
+
+
+def wired(entries, mode, tools=()):
+    """The command of the hook entry that already runs gate.py in `mode` (and, for a
+    matcher-bearing event, matches every tool in `tools`); None when none does."""
+    for entry in entries:
+        if not covers(entry, tools):
+            continue
+        for hook in entry.get("hooks", []):
+            if invoked(hook.get("command") or "", mode):
+                return hook["command"]
+    return None
+
+
 def merge_settings(plan, dry_run):
-    """Add the Stop and PreToolUse hooks to .claude/settings.json, keeping what is there."""
+    """Add the Stop and PreToolUse hooks to .claude/settings.json, keeping what is there. A
+    hook that already runs gate.py in that mode counts as wired however the project wrapped
+    it (a PATH prefix, an existence guard): attach never appends a second, and names the
+    command it trusted so a person can see what it took for the gate."""
     rel = os.path.join(".claude", "settings.json")
     path = os.path.join(plan.root, rel)
     settings = {}
@@ -425,14 +458,17 @@ def merge_settings(plan, dry_run):
     stop = {"hooks": [{"type": "command", "command": "python3 quality/bin/gate.py --hook --changed"}]}
     guard = {"matcher": "Bash|Edit|Write|MultiEdit",
              "hooks": [{"type": "command", "command": "python3 quality/bin/gate.py --guard"}]}
-    changed = False
-    for event, entry in (("Stop", stop), ("PreToolUse", guard)):
+    changed, trusted = False, []
+    for event, entry, mode, tools in (("Stop", stop, "--hook", ()), ("PreToolUse", guard, "--guard", GUARDED_TOOLS)):
         existing = hooks.setdefault(event, [])
-        if not any(json.dumps(e, sort_keys=True) == json.dumps(entry, sort_keys=True) for e in existing):
+        command = wired(existing, mode, tools)
+        if command is None:
             existing.append(entry)
             changed = True
+        else:
+            trusted.append("%s: `%s`" % (event, command))
     if not changed:
-        plan.say(rel, "kept (hooks already wired)")
+        plan.say(rel, "kept (hooks already wired — %s)" % "; ".join(trusted))
         return
     plan.say(rel, "hooks added" if os.path.isfile(path) else "written")
     if not dry_run:
