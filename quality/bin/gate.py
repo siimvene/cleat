@@ -264,9 +264,18 @@ def changed_files(root):
     """The repo-relative files changed against the base — what --changed scopes the heavy
     gates to. Untracked files count; a tree that is not a repository changes nothing."""
     try:
-        return sorted(changed.changed_lines(root, changed.base_ref(root)))
+        files = sorted(changed.changed_lines(root, changed.base_ref(root)))
     except changed.ChangedError:
         return []
+    # A path that begins with "-" would be parsed as a FLAG by the scoped checks
+    # (they take `--only FILE...`), so a file named `--write-baseline` in the change
+    # set would rewrite the baselines from the Stop hook — the exact policy change
+    # the guard exists to refuse. Refuse the scoped run instead; the fix is a rename.
+    flagged = [f for f in files if f.startswith("-")]
+    if flagged:
+        sys.exit("gate: refusing --changed: %d changed path(s) begin with '-' and would parse as "
+                 "flags in the scoped checks; rename them: %s" % (len(flagged), " ".join(flagged)))
+    return files
 
 
 def run_all(gates, config_path, strict, skip_missing=False, config=None, changed_only=None):
