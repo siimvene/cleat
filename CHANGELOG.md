@@ -4,6 +4,7 @@ Newest first. A line per gate or behavior change; policy changes to this reposit
 
 ## Unreleased
 
+- The Stop hook reports a failure set once: the report that blocked is fingerprinted under `quality/.running/`, and a later stop that would send the identical report gets one line and exit 0 rather than the whole report again. On the pilot codebase a failure the agent could not fix (a policy question for a person) blocked every stop and re-sent the same report eight times in one session. Any change in any gate's output — a file fixed, a file broken, a count moved — is a new report and blocks again. `--stats` renames the row this feeds from "blocked twice in a row" to "report already sent", which is what it now counts.
 - New gates: conventions (a project's own rules as regexes with a message at the site, ratcheted by site) and dead-symbols (declared names nothing references, through ast-grep; a report by default).
 - `gate.py --changed` scopes complexity, escapes, conventions and duplication to the files changed against the base; the Stop hook attach writes uses it, CI still runs everything.
 - Mutation: a filtered (narrow) suite run that executed no tests is inconclusive, not survival; the full suite decides. It made CI flaky on Linux, where the filter sometimes matched nothing.
