@@ -87,6 +87,8 @@ def _lizard_csv(paths, languages, excludes, root=None):
         with tempfile.TemporaryDirectory(prefix="lizard-rust-") as tmp:
             mirror = os.path.realpath(tmp)
             mirror_root = mirror + os.path.realpath(root) if root else None
+            if mirror_root:
+                os.makedirs(mirror_root, exist_ok=True)  # a source outside the root mirrors nothing under it
             output += _lizard(_mirror_rust(paths, mirror), ["rust"], excludes, mirror_root).replace(mirror, "")
     return output
 
@@ -95,8 +97,9 @@ def _lizard(paths, languages, excludes, root=None):
     """One lizard --csv run over `paths`, or a ToolError. With `root`, lizard runs from
     there over root-relative paths, so an exclude glob matches the path as the repository
     knows it: "*/tmp/*" is a tmp directory in the tree, not a checkout that happens to live
-    under /tmp (which used to match on its prefix and judge nothing). The CSV comes back
-    with absolute paths either way."""
+    under /tmp (which used to match on its prefix and judge nothing). Paths are taken as
+    the repository spells them (a symlinked source keeps its name, so a glob written
+    against it still matches). The CSV comes back with absolute paths either way."""
     command = ["lizard", "--csv"]
     for language in languages:
         command += ["-l", language]
@@ -104,8 +107,8 @@ def _lizard(paths, languages, excludes, root=None):
         command += ["-x", pattern]
     command.append("--")  # a root-relative path may begin with "-"; without this lizard reads it as a flag
     if root:
-        root = os.path.realpath(root)
-        command += [os.path.relpath(os.path.realpath(p), root) for p in paths]
+        root = os.path.abspath(root)
+        command += [os.path.relpath(os.path.abspath(p), root) for p in paths]
     else:
         command += list(paths)
     try:

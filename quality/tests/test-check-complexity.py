@@ -268,14 +268,23 @@ try:
         write(os.path.join(under_tmp, "src", "deep.py"), "def deep_fn(a):\n" + branchy_body)
         write(os.path.join(under_tmp, "tmp", "scratch.py"), "def scratch_fn(a):\n" + branchy_body)
         write(os.path.join(under_tmp, "-dash", "d.py"), "def dash_fn(a):\n" + branchy_body)
+        write(os.path.join(under_tmp, "real", "keep", "k.py"), "def keep_fn(a):\n" + branchy_body)
+        write(os.path.join(under_tmp, "real", "generated", "g.py"), "def gen_fn(a):\n" + branchy_body)
+        os.symlink(os.path.join(under_tmp, "real"), os.path.join(under_tmp, "vendor"))
+        rust_body = "\n".join(["    if a == %d { return %d; }" % (i, i) for i in range(1, 10)] + ["    0", "}", ""])
+        outside = os.path.join(tmp, "outside")
+        write(os.path.join(outside, "lib.rs"), "fn outside_fn(a: i32) -> i32 {\n" + rust_body)
         ut_config = os.path.join(under_tmp, "quality.json")
         write(ut_config, json.dumps({"complexity": {
-            "sources": ["src", "tmp", "-dash"], "languages": ["python"], "exclude": ["*/tmp/*", "tmp/*"],
+            "sources": ["src", "tmp", "-dash", "vendor", outside], "languages": ["python", "rust"],
+            "exclude": ["*/tmp/*", "tmp/*", "vendor/generated/*"],
             "ceilings": {"cc": 8, "lines": 60}, "baseline": "ut-baseline.json"}}))
         code, out = run(ut_config)
         check("a checkout under a directory named tmp still judges its sources", "deep.py" in out, out)
         check("the tree's own tmp directory is still excluded", "scratch.py" not in out, out)
         check("a root-relative source beginning with - is a path to lizard, not a flag", "d.py" in out, out)
+        check("a symlinked source keeps its repository name, so its glob still excludes", "k.py" in out and "g.py" not in out, out)
+        check("a Rust source outside the root is judged, not a crash", "lib.rs" in out and "Traceback" not in out, out)
     else:
         check("lizard is not installed, so root-relative excludes are not exercised", True)
 
