@@ -274,8 +274,8 @@ def flag_shaped(files):
     """The changed paths that begin with "-" — they would be parsed as FLAGS by the
     scoped checks (which take `--only FILE...`), so a file named `--write-baseline` in
     the change set would rewrite the baselines from the Stop hook, the exact policy
-    change the guard exists to refuse. The caller refuses the scoped run; the fix is a
-    rename."""
+    change the guard exists to refuse. The caller drops the scope and runs the full pass
+    instead; the fix is a rename."""
     return [f for f in files if f.startswith("-")]
 
 
@@ -407,21 +407,22 @@ def finish(failures, hook, root=None):
 
 
 def scope_of(args, root):
-    """(the files the heavy gates are scoped to — None for the full pass, an exit code or
-    None): under --changed, a changed path beginning with '-' would parse as a flag in the
-    scoped checks, so the run is refused naming the paths. In hook mode the Stop hook's
-    contract is exit 2 ("not done", stderr to the agent); exit 1 would let the agent stop
-    with the whole pass skipped."""
+    """The files the heavy gates are scoped to under --changed; None for the full pass. A
+    changed path beginning with '-' would parse as a flag in the scoped checks (`--only
+    FILE...`), so with one in the change set the scope is dropped and the FULL pass runs,
+    said on stderr: nothing is skipped, nothing reaches a check as a flag, and the Stop
+    hook keeps its one-block contract (a refusal exiting 2 on every stop trapped the agent
+    until the file was renamed, and never reached the event log)."""
     if not args.changed:
-        return None, None
+        return None
     scope = changed_files(root)
     flagged = flag_shaped(scope or [])
     if not flagged:
-        return scope, None
-    sys.stderr.write("gate: refusing --changed: %d changed path(s) begin with '-' and would "
-                     "parse as flags in the scoped checks; rename them: %s\n"
+        return scope
+    sys.stderr.write("gate: %d changed path(s) begin with '-' and would parse as flags in the scoped "
+                     "checks; running the full pass instead. Rename them: %s\n"
                      % (len(flagged), " ".join(flagged)))
-    return None, 2 if args.hook else 1
+    return None
 
 
 def main():
@@ -454,9 +455,7 @@ def main():
         return 0
     if not gates:
         return fail("%s configures no gate — see quality/README.md" % config.file)
-    scope, refused = scope_of(args, config.root)
-    if refused:
-        return refused
+    scope = scope_of(args, config.root)
     with runlock.held(os.path.dirname(HERE), "gate.py"):
         failures = run_all(gates, config.file, args.strict, args.skip_missing_tools, config, scope)
     return finish(failures, args.hook, config.root)
