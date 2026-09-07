@@ -291,6 +291,14 @@ try:
         # judged, not excluded: the mirror pass sees rustlink/lib2.rs, not ../../x/tmp/rustreal/lib2.rs
         # (findings are then keyed by realpath, as every reader does)
         check("a symlinked Rust source is judged by its repository name in the mirror pass too", "lib2.rs" in out, out)
+        # --only (what gate.py --changed passes) keeps the same excludes: lizard applies -x to
+        # the files it walks, not to a file named on its command line, so the scoped run used
+        # to judge every changed test file the full run excludes.
+        code, out = run(ut_config, "--only", "src/deep.py", "tmp/scratch.py")
+        check("--only judges a changed source the full run judges", "deep.py" in out, out)
+        check("--only drops a changed file an exclude glob drops", "scratch.py" not in out, out)
+        code, out = run(ut_config, "--only", "tmp/scratch.py")
+        check("--only with every file excluded judges nothing and passes", code == 0 and "scratch.py" not in out, out)
     else:
         check("lizard is not installed, so root-relative excludes are not exercised", True)
 

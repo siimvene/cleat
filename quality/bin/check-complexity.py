@@ -47,7 +47,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import quality_config
 import ratchet
-from extractors import complexity
+from extractors import complexity, patterns
 
 SECTIONS = ("complexity", "complexity_lizard")
 RETIRED_KEYS = ("cwd", "config")   # the SwiftLint-native gate's shape, before the two gates were one
@@ -96,10 +96,30 @@ def read_functions(args, name, section, config):
             return complexity.functions_from_swiftlint(json.load(handle)), 0, "swiftlint", None
     roots = config.paths(config.get(name, "sources"))
     if args.only is not None:
-        roots = [config.path(f) for f in args.only if os.path.isfile(config.path(f))]
+        roots = scoped_sources(args.only, section.get("exclude", []), config)
         if not roots:
             return [], 0, complexity.tool_of(section), None
     return complexity.measure(section, roots, config.paths(section.get("exclude_except", [])), root=config.root)
+
+
+def scoped_sources(only, exclude, config):
+    """The `--only` files lizard should judge: the ones that exist, minus those an
+    `exclude` glob drops. lizard applies `-x` to the files it walks and never to a file
+    named on its command line, so without this the scoped run judged every changed test
+    file the full run excludes. A glob is matched the way the full run's walk spells the
+    path: relative to the root, with and without the leading `./` lizard's walk over "."
+    adds; never against the absolute path, or a checkout under /tmp would match `*/tmp/*`
+    and the scoped run would judge nothing. `exclude_except` files keep their own pass."""
+    kept = []
+    for f in only:
+        path = config.path(f)
+        if not os.path.isfile(path):
+            continue
+        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(config.root))
+        if patterns.excluded(rel, exclude) or patterns.excluded("./" + rel, exclude):
+            continue
+        kept.append(path)
+    return kept
 
 
 

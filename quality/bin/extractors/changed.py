@@ -6,6 +6,15 @@ the default branch, else HEAD — so on the default branch with nothing pushed
 "changed" means uncommitted. `changed_lines()` reads `git diff -U0` from that
 base to the working tree, plus every line of every untracked file, as
 {repo-relative path: set of line numbers}.
+
+Whitespace is not a change: the diff runs with `--ignore-all-space`, so a
+line a formatter reflowed, re-indented or re-spaced is not "changed" and a
+format-only commit changes nothing. Before, a formatter pass over a tree
+marked every line it touched, and the duplication gate reported every
+pre-existing clone under those lines as new (25 pairs on one pilot branch,
+none introduced by it). A line the formatter joined or split is still a
+change, as it should be. The gates this scopes key on functions, sites and
+clones, none of which an indentation-only edit moves.
 """
 
 import os
@@ -13,6 +22,7 @@ import re
 import subprocess
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+DIFF_FLAGS = ("-U0", "--no-color", "--no-ext-diff", "--ignore-all-space")
 
 
 class ChangedError(Exception):
@@ -68,12 +78,19 @@ def _untracked(repo, changed):
     return changed
 
 
+def base_text(repo, base, path):
+    """The text of repo-relative `path` as `base` had it, or None when the base has no
+    such file (a new file, or a tree that is not a repository)."""
+    code, out = _git(repo, "show", "%s:%s" % (base, path))
+    return out if code == 0 else None
+
+
 def changed_lines(repo, base):
     """{repo-relative path: {line, …}} for every line added or changed between `base`
     and the working tree, untracked files included in full."""
-    code, out = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--")
+    code, out = _git(repo, "diff", *DIFF_FLAGS, base, "--")
     if code != 0:
-        code, out = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", "--")
+        code, out = _git(repo, "diff", *DIFF_FLAGS, "--")
     if code != 0:
         raise ChangedError("git diff failed in %s" % repo)
     return _untracked(repo, _parse_diff(out))

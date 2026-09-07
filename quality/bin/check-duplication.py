@@ -8,7 +8,10 @@ build says otherwise. Two judgments, from one reading:
 
   changed lines   any clone one of whose copies overlaps a line changed
                   against the base (see extractors/changed.py) fails — the
-                  block you just wrote, or just touched, has a twin
+                  block you just wrote, or just touched, has a twin —
+                  unless the base already held every copy: a formatter
+                  that joins or splits lines changes every line of a block
+                  without writing a new one, and that debt is not new
   density         the share of significant lines inside some clone, held by
                   a baseline that only ever lowers
 
@@ -81,14 +84,54 @@ def describe(clone):
     return "%d lines  %s" % (clone.lines, copies)
 
 
-def judge_changed(clones, config, base):
-    """The clones that touch a changed line, and how many lines changed — none when the
-    tree is not a git repository, so density alone is judged."""
+# The finder's punctuation-only lines, plus the colon: a parenthesised `with (...):` puts
+# it on a `):` line the finder drops, where the unparenthesised form kept it on a kept line.
+_DROP = str.maketrans("", "", " :" + "".join(sorted(duplication.PUNCTUATION_ONLY)))
+
+
+def _flat(lines):
+    """Significant lines joined with every space, bracket, semicolon, comma and colon
+    removed: the shape of a block a formatter cannot change by joining, splitting,
+    re-indenting or re-wrapping its lines. The finder already drops lines made only of
+    that punctuation, so a block's identity here is its other characters, consistently."""
+    return "".join(text.translate(_DROP) for _, text in lines)
+
+
+def already_at_base(clone, config, base, skip_rust_tests=True):
+    """Whether the base already held every copy of `clone`: each copy's significant text,
+    whitespace removed, is a substring of the base version of its file, read the same way.
+    A formatter that joined or split the copy's lines changed every one of them (so the
+    clone touches the diff) but wrote no new block: that is the debt the density baseline
+    already holds, not a twin the agent just made. A copy in a file the base lacks, a copy
+    moved between files, or one the formatter rewrote beyond whitespace and brackets (quote
+    style, say) reads as new and is reported; the residue is small and errs toward reporting."""
+    for path, start, end in clone.locations:
+        text = changed.base_text(config.root, base, path)
+        if text is None:
+            return False
+        copy = [l for l in duplication.significant_in(config.path(path), skip_rust_tests) if start <= l[0] <= end]
+        if _flat(copy) not in _flat(duplication.significant(text)):
+            return False
+    return True
+
+
+def judge_changed(clones, config, base, skip_rust_tests=True):
+    """(the clones that touch a changed line and are new, how many lines changed, how many
+    touching clones the base already held) — nothing when the tree is not a git repository,
+    so density alone is judged."""
     try:
         lines = changed.changed_lines(config.root, base)
     except changed.ChangedError:
-        return [], 0
-    return [c for c in clones if c.touches(lines)], sum(len(v) for v in lines.values())
+        return [], 0, 0
+    touching = [c for c in clones if c.touches(lines)]
+    new = [c for c in touching if not already_at_base(c, config, base, skip_rust_tests)]
+    return new, sum(len(v) for v in lines.values()), len(touching) - len(new)
+
+
+def print_held(held):
+    if held:
+        print("NOTE: %d clone pair(s) under changed lines already had every copy at the base — reformatted, "
+              "not written; the density baseline holds that debt" % held)
 
 
 def measure(section, config):
@@ -140,12 +183,14 @@ def parse_args():
 
 def judge_all(args, section, config, baseline_path, finding, clones, measured):
     """The changed-lines judgment, then the density ratchet; the exit code."""
-    touching, changed_count = [], 0
+    touching, changed_count, held = [], 0, 0
     if not args.repo_only:
         base = changed.base_ref(config.root, args.base or section.get("base_ref"))
-        touching, changed_count = judge_changed(clones, config, base)
+        touching, changed_count, held = judge_changed(clones, config, base, section.get("skip_rust_tests", True))
     if touching:
         print_touching(touching, changed_count)
+    if not args.quiet:
+        print_held(held)
     entries, stored = ratchet.read(baseline_path)
     ok_line = ok_line_for(finding.values, len(clones), None if args.repo_only else changed_count)
     code = ratchet.report(ratchet.judge([finding], entries, ["percent"], stored, measured), GATE, len(entries), ok_line,
@@ -164,12 +209,15 @@ def main():
         print("FAIL: %s" % (problem.args[0] if problem.args else problem), file=sys.stderr)
         return 2
     if args.changed_only:
-        touching, changed_count = judge_changed(clones, config, changed.base_ref(config.root, args.base or section.get("base_ref")))
+        base = changed.base_ref(config.root, args.base or section.get("base_ref"))
+        touching, changed_count, held = judge_changed(clones, config, base, section.get("skip_rust_tests", True))
         if touching:
             print_touching(touching, changed_count)
+            print_held(held)
             return 1
         if not args.quiet:
             print("OK: none of %d clone pair(s) overlap the %d changed line(s)" % (len(clones), changed_count))
+            print_held(held)
         return 0
     if args.write_baseline:
         ratchet.write(baseline_path, [finding], measured)
