@@ -83,9 +83,14 @@ def rust_test_ranges(path):
         return []
     try:
         with open(path, errors="replace") as handle:
-            lines = handle.read().split("\n")
+            return rust_test_ranges_of(handle.read())
     except OSError:
         return []
+
+
+def rust_test_ranges_of(text):
+    """`rust_test_ranges` for a Rust source held as text (a base version read from git)."""
+    lines = text.split("\n")
     ranges, number = [], 0
     while number < len(lines):
         if TEST_ATTRIBUTE.match(lines[number]):

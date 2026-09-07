@@ -105,32 +105,41 @@ def already_at_base(clone, config, base, skip_rust_tests=True, cache=None):
     already holds, not a twin the agent just made. A copy in a file the base lacks, a copy
     moved between files, or one the formatter rewrote beyond whitespace and brackets (quote
     style, say) reads as new and is reported; that residue errs toward reporting. The
-    other way round, the flattened text has no line separators (a join must still match),
-    so a block whose characters happen to run together elsewhere in the base file would be
-    held; at six or more significant lines that is the block itself. `cache` holds each
-    file's flattened base and working text for the run: one `git show` per file, not per
-    copy."""
+    other way round: an edit that changes only brackets, commas or colons inside a copy
+    (`(v,)` to `[v]`) reads as reformatting, and the flattened text has no line separators
+    (a join must still match), so a block whose characters ran together elsewhere in the
+    base file would be held — at six or more significant lines that is the block itself.
+    Occurrences are counted per file: a second copy pasted into a file that already had
+    one is new, since the base holds fewer occurrences than the working tree. `cache`
+    holds each file's flattened base and working text for the run: one `git show` and
+    one read per file, not per copy."""
     cache = {} if cache is None else cache
     for path, start, end in clone.locations:
-        held = _flat_base(path, config, base, cache)
-        if held is None or _flat(_copy_lines(path, start, end, config, skip_rust_tests, cache)) not in held:
+        held = _flat_base(path, config, base, cache, skip_rust_tests)
+        if held is None:
+            return False
+        lines = _tree_lines(path, config, skip_rust_tests, cache)
+        copy = _flat(l for l in lines if start <= l[0] <= end)
+        if held.count(copy) < _flat(lines).count(copy):
             return False
     return True
 
 
-def _flat_base(path, config, base, cache):
-    """The flattened base text of `path`, None when the base lacks the file; one git read per file."""
+def _flat_base(path, config, base, cache, skip_rust_tests):
+    """The flattened base text of `path` (its inline Rust test modules skipped, as the working
+    tree's are), None when the base lacks the file; one git read per file."""
     if ("base", path) not in cache:
         text = changed.base_text(config.root, base, path)
-        cache["base", path] = None if text is None else _flat(duplication.significant(text))
+        skip = patterns.rust_test_ranges_of(text) if text is not None and skip_rust_tests and path.endswith(".rs") else ()
+        cache["base", path] = None if text is None else _flat(duplication.significant(text, skip))
     return cache["base", path]
 
 
-def _copy_lines(path, start, end, config, skip_rust_tests, cache):
-    """The significant lines of the working-tree copy at `path`:`start`-`end`; one file read per file."""
+def _tree_lines(path, config, skip_rust_tests, cache):
+    """The significant lines of the working-tree file at `path`; one read per file."""
     if ("tree", path) not in cache:
         cache["tree", path] = duplication.significant_in(config.path(path), skip_rust_tests)
-    return [l for l in cache["tree", path] if start <= l[0] <= end]
+    return cache["tree", path]
 
 
 def judge_changed(clones, config, base, skip_rust_tests=True):

@@ -159,6 +159,25 @@ try:
     code, out = run(config2, "--changed-only")
     check("a copy the base did not have is still a new clone, formatted or not", code == 1 and "src/c.py" in out and "the block has a twin" in out, out)
     check("while the reformatted pair is still not counted against it", "already had every copy at the base" in out, out)
+    git(repo2, "checkout", "-q", "--", "src")
+    # a second copy pasted into a file that already held one: the base has one occurrence, the tree two
+    write(a2, "def total_a(items):\n    total = 0\n" + joined + "    return total\n\n\ndef total_again(items):\n    total = 0\n" + joined + "    return total\n")
+    code, out = run(config2, "--changed-only")
+    check("a copy pasted into a file that already held one is new: the base holds fewer occurrences", code == 1 and "src/a.py" in out and "the block has a twin" in out, out)
+    git(repo2, "checkout", "-q", "--", "src")
+    # a block the base held only inside an inline Rust test module does not excuse the same block as production code
+    prod = "\n".join("pub fn after_%d(x: i32) -> i32 { x * %d + 1 }" % (i, i) for i in range(8)) + "\n"
+    in_tests = "#[cfg(test)]\nmod tests {\n" + prod + "}\n"
+    ra, rb = os.path.join(repo2, "src", "a.rs"), os.path.join(repo2, "src", "b.rs")
+    write(ra, "pub fn a() -> i32 { 1 }\n\n" + in_tests)
+    write(rb, "pub fn b() -> i32 { 2 }\n\n" + in_tests)
+    write(config2, json.dumps({"duplication": {"roots": ["src"], "languages": ["python", "rust"], "baseline": "duplication-baseline.json"}}))
+    git(repo2, "add", "-A")
+    git(repo2, "commit", "-q", "-m", "rust tests")
+    write(ra, "pub fn a() -> i32 { 1 }\n\n" + in_tests + "\n" + prod)
+    write(rb, "pub fn b() -> i32 { 2 }\n\n" + in_tests + "\n" + prod)
+    code, out = run(config2, "--changed-only")
+    check("a block the base held only in #[cfg(test)] does not excuse it as new production code", code == 1 and "src/a.rs" in out and "the block has a twin" in out, out)
 
     check("clones inside inline #[cfg(test)] modules are not production clones", duplication.find([rs_a, rs_b], repo) == [], str([(c.locations, c.lines) for c in duplication.find([rs_a, rs_b], repo)]))
     check("but count when skip_rust_tests is off", len(duplication.find([rs_a, rs_b], repo, skip_rust_tests=False)) == 1)
