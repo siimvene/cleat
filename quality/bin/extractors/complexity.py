@@ -60,11 +60,13 @@ def masked_raw_strings(text):
 
 
 def _mirror_rust(paths, mirror):
-    """Every .rs file under `paths`, masked, at its own absolute path under `mirror`;
-    returns the mirror-side paths to hand lizard, one per entry of `paths`."""
+    """Every .rs file under `paths`, masked, at its own absolute path under `mirror` — the
+    path as the repository spells it, a symlinked source kept by name, so the root-relative
+    excludes match the same names in both passes; returns the mirror-side paths to hand
+    lizard, one per entry of `paths`."""
     mirrored = []
     for path in paths:
-        real = os.path.realpath(path)
+        real = os.path.abspath(path)
         files = [real] if os.path.isfile(real) else [os.path.join(d, f) for d, _, fs in os.walk(real) for f in fs]
         os.makedirs(mirror + (os.path.dirname(real) if os.path.isfile(real) else real), exist_ok=True)
         for file in files:
@@ -86,7 +88,7 @@ def _lizard_csv(paths, languages, excludes, root=None):
     if "rust" in languages:
         with tempfile.TemporaryDirectory(prefix="lizard-rust-") as tmp:
             mirror = os.path.realpath(tmp)
-            mirror_root = mirror + os.path.realpath(root) if root else None
+            mirror_root = mirror + os.path.abspath(root) if root else None
             if mirror_root:
                 os.makedirs(mirror_root, exist_ok=True)  # a source outside the root mirrors nothing under it
             output += _lizard(_mirror_rust(paths, mirror), ["rust"], excludes, mirror_root).replace(mirror, "")
