@@ -127,6 +127,35 @@ try:
     code, out, err = run("--config", os.path.join(repo, "quality.json"))
     check("the full run judges the unchanged file too", code == 1 and "src/old.py:1  noqa" in out, out + err)
 
+    # ---- CLEAT_HOOKS=off: both hook modes stand down — the switch for a reviewer session
+    write(os.path.join(tmp, "src", "a.py"), ESCAPE)
+    write(config, json.dumps({"escapes": {"roots": ["src"], "languages": ["python"], "baseline": "escapes-baseline.json"}}))
+    off = dict(os.environ, CLEAT_HOOKS="off")
+    proc = subprocess.run([sys.executable, SCRIPT, "--config", config, "--hook"], capture_output=True, text=True, env=off)
+    check("with CLEAT_HOOKS=off the Stop hook exits 0 and says nothing, whatever the gates would say", proc.returncode == 0 and proc.stdout == "" and proc.stderr == "", proc.stdout + proc.stderr)
+    proc = subprocess.run([sys.executable, SCRIPT, "--guard"], capture_output=True, text=True, env=off, cwd=tmp, input=json.dumps({"tool_name": "Edit", "tool_input": {"file_path": "quality.json"}}))
+    check("and the guard lets everything through", proc.returncode == 0, proc.stderr)
+    proc = subprocess.run([sys.executable, SCRIPT, "--config", config, "--strict"], capture_output=True, text=True, env=off)
+    check("a plain run is unaffected by the switch", proc.returncode == 1, proc.stdout)
+
+    # ---- commands: the project's own checks run beside cleat's
+    write(os.path.join(tmp, "scripts", "own-check.sh"), "#!/bin/sh\necho own check ran; exit ${OWN_EXIT:-0}\n")
+    os.chmod(os.path.join(tmp, "scripts", "own-check.sh"), 0o755)
+    write(config, json.dumps({"doc_size": [{"file": "README.md", "ceiling": 10}],
+                              "commands": [{"name": "own-check", "run": "sh scripts/own-check.sh"},
+                                           {"name": "needs-a-tool", "run": "echo never", "needs": ["no-such-tool-xyz"]},
+                                           {"name": "later", "run": "echo postflight", "postflight": True}]}))
+    code, out, err = run("--config", config, "--list")
+    check("a commands entry is a gate; a postflight one waits for --postflight", out.split() == ["doc-size", "own-check", "needs-a-tool"], out + err)
+    code, out, err = run("--config", config, "--skip-missing-tools")
+    check("it runs through the shell from the config's directory, and one needing an absent tool is skipped",
+          code == 0 and "ok    own-check" in out and "own check ran" in out and "skip  needs-a-tool (no-such-tool-xyz not installed)" in out, out + err)
+    proc = subprocess.run([sys.executable, SCRIPT, "--config", config, "--gate", "own-check"], capture_output=True, text=True, env=dict(os.environ, OWN_EXIT="3"))
+    check("a non-zero exit fails it", proc.returncode == 1 and "FAIL  own-check" in proc.stdout, proc.stdout)
+    write(config, json.dumps({"commands": [{"name": "nameless"}]}))
+    code, out, err = run("--config", config)
+    check("an entry without run is refused", code == 2 and '"run"' in err, err)
+
     # ---- a section's old name beside its new one is one gate, not two
     write(config, json.dumps({"complexity": {"tool": "lizard", "sources": ["src"], "languages": ["python"], "ceilings": {"cc": 8, "lines": 60}, "baseline": "c.json"},
                               "complexity_lizard": {"sources": ["src"], "languages": ["python"], "ceilings": {"cc": 8, "lines": 60}, "baseline": "c.json"}}))

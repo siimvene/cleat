@@ -88,6 +88,13 @@ class Verdict:
         """Whether the baseline records more than the code has — what --strict refuses."""
         return bool(self.stale or self.improved or self.drift)
 
+    @property
+    def measurement_only(self):
+        """One entry, one finding, no key to lose: a share or a count, not sites. Any
+        ordinary diff moves such a number, so an improvement is the note it should be
+        and never a strict failure — only stale entries and drift are."""
+        return len(self.improved) + len(self.held) + len(self.worsened) == 1 and not self.new and not self.stale
+
 
 # ---------------------------------------------------------------- the file
 
@@ -300,7 +307,7 @@ def report(verdict, gate, baseline_size, ok_line, quiet=False, strict=False, con
     if not quiet:
         print(ok_line)
     _print_notes(verdict, gate, offer_remedy=True)
-    if strict and verdict.loose:
+    if strict and verdict.loose and not (verdict.measurement_only and not verdict.drift):
         print("FAIL: the baseline is looser than the code — under --strict it must match exactly. "
               "Tighten it with the command above and commit the result.")
         return 1

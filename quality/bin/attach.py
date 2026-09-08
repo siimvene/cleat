@@ -47,8 +47,11 @@ so attaching twice is safe. `--force` rewrites quality.json and the baselines.
 
 Upgrading a project that already carries a copy: `--refresh` replaces the
 template's own files — `bin/`, `tests/`, the two documents — with this
-checkout's, and keeps everything else under `quality/` (the baselines, a
-project's own additions beside them). `--add` puts the sections attach would
+checkout's, and keeps everything else under `quality/`: the baselines, and
+the project's own scripts inside `bin/` and `tests/` (a wrapper whose name
+its tooling is wired to). A file by a name the template retired is the old
+template file and is dropped, unless it says "Not part of cleat's template"
+in its header, which is how a project keeps a retired name as its own. `--add` puts the sections attach would
 generate today into an existing quality.json where they are missing, writes
 their baselines, and touches no section that is already there.
 """
@@ -73,7 +76,7 @@ _spec = importlib.util.spec_from_file_location("check_escapes", os.path.join(HER
 check_escapes = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(check_escapes)
 
-SKIP_DIRS = set(check_escapes.DEFAULT_SKIP_DIRS) | {"quality", ".claude", ".github", ".idea", ".vscode"}
+SKIP_DIRS = set(patterns.DEFAULT_SKIP_DIRS) | {"quality", ".claude", ".github", ".idea", ".vscode"}
 
 # The languages attach can recognise: suffixes → the escapes language, and lizard's -l name.
 LIZARD_NAMES = {"python": "python", "typescript": "typescript", "javascript": "javascript", "swift": "swift",
@@ -183,8 +186,8 @@ def _note_languages(counts, filenames):
             counts[language] = counts.get(language, 0) + 1
 
 
-def _kept(dirnames):
-    return sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
+def _kept(dirnames, dirpath="."):
+    return sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".") and not patterns.is_nested_checkout(os.path.join(dirpath, d)))
 
 
 def _outermost(tests):
@@ -201,7 +204,7 @@ def survey(plan):
     counts = {}
     tests = set()
     for dirpath, dirnames, filenames in os.walk(plan.root):
-        dirnames[:] = _kept(dirnames)
+        dirnames[:] = _kept(dirnames, dirpath)
         _note_tests(tests, os.path.relpath(dirpath, plan.root), dirnames)
         _note_languages(counts, filenames)
     plan.languages = dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
@@ -367,18 +370,56 @@ class Busy(Exception):
     """A gate or a suite is running from the copy --refresh would replace."""
 
 
-def _replace_part(source, target, part):
+# Template files cleat retired. A file by one of these names in a vendored copy is the
+# old template file — unless it says otherwise: a project that keeps the name as its own
+# wrapper (the name is wired into its tooling) marks the file with KEEP_MARKER.
+RETIRED_TEMPLATE_FILES = {"check-complexity.sh", "check-complexity-lizard.py", "lizard_reader.py", "check-features-map.py"}
+KEEP_MARKER = "Not part of cleat's template"
+
+
+def _project_owned(path, shipped):
+    """Whether a file in a vendored bin/ or tests/ is the project's own — not one the
+    template ships now, and not one it used to ship (unless marked as kept)."""
+    name = os.path.basename(path)
+    if name in shipped or name == "__pycache__":
+        return False
+    if name not in RETIRED_TEMPLATE_FILES:
+        return True
+    with open(path, errors="replace") as handle:
+        return KEEP_MARKER in handle.read(4000)
+
+
+def _refresh_dir(plan, src, dst):
+    """Replace the template's files in a vendored directory, keep the project's own,
+    drop the template's retired ones."""
+    shipped = set(os.listdir(src))
+    kept, dropped = [], []
+    for name in sorted(os.listdir(dst)):
+        path = os.path.join(dst, name)
+        if name in shipped:
+            continue
+        if _project_owned(path, shipped):
+            kept.append(name)
+        else:
+            dropped.append(name)
+            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+    shutil.copytree(src, dst, ignore=TEMPLATE_IGNORE, dirs_exist_ok=True)
+    rel = os.path.relpath(dst, plan.root)
+    if kept:
+        plan.say(rel, "kept the project's own: " + ", ".join(kept))
+    if dropped:
+        plan.say(rel, "dropped what the template retired: " + ", ".join(dropped))
+
+
+def _replace_part(plan, source, target, part):
     src, dst = os.path.join(source, part), os.path.join(target, part)
     if not os.path.exists(src):
         return
-    if os.path.isdir(dst):
-        shutil.rmtree(dst)
-    elif os.path.exists(dst):
-        os.remove(dst)
     if os.path.isdir(src):
-        shutil.copytree(src, dst, ignore=TEMPLATE_IGNORE)
-    else:
-        shutil.copy2(src, dst)
+        os.makedirs(dst, exist_ok=True)
+        _refresh_dir(plan, src, dst)
+        return
+    shutil.copy2(src, dst)
 
 
 def refresh(plan, source, target, dry_run):
@@ -393,7 +434,7 @@ def refresh(plan, source, target, dry_run):
     plan.say("quality/", "refreshed from %s (%s replaced; the rest kept)" % (source, ", ".join(TEMPLATE_PARTS)))
     if not dry_run:
         for part in TEMPLATE_PARTS:
-            _replace_part(source, target, part)
+            _replace_part(plan, source, target, part)
 
 
 def vendor(plan, dry_run, do_refresh=False):
@@ -423,28 +464,33 @@ def vendor(plan, dry_run, do_refresh=False):
 GATE_IN_HOOK = ('python3 "$(git -C "${CLAUDE_PROJECT_DIR:-.}" rev-parse --show-toplevel 2>/dev/null '
                 '|| printf %s "${CLAUDE_PROJECT_DIR:-.}")/quality/bin/gate.py"')
 
+def has_cleat_hook(entries, mode):
+    """Whether one of an event's hook entries already runs `gate.py <mode>` — however the
+    project spelled the path in front of it (a hand-edited hook stays as it is)."""
+    return any("gate.py" in h.get("command", "") and mode in h.get("command", "")
+               for e in entries for h in e.get("hooks", []))
+
+
 def merge_settings(plan, dry_run):
-    """Add the Stop and PreToolUse hooks to .claude/settings.json, keeping what is there."""
+    """Add the Stop and PreToolUse hooks to .claude/settings.json, keeping what is there —
+    including a cleat hook the project already wired its own way."""
     rel = os.path.join(".claude", "settings.json")
     path = os.path.join(plan.root, rel)
-    settings = {}
-    if os.path.isfile(path):
-        with open(path) as handle:
-            settings = json.load(handle)
+    settings = json.loads(_read_if_exists(path) or "{}")
     hooks = settings.setdefault("hooks", {})
-    stop = {"hooks": [{"type": "command", "command": GATE_IN_HOOK + " --hook --changed"}]}
-    guard = {"matcher": "Bash|Edit|Write|MultiEdit",
-             "hooks": [{"type": "command", "command": GATE_IN_HOOK + " --guard"}]}
-    changed = False
-    for event, entry in (("Stop", stop), ("PreToolUse", guard)):
+    wanted = (("Stop", "--hook", {"hooks": [{"type": "command", "command": GATE_IN_HOOK + " --hook --changed"}]}),
+              ("PreToolUse", "--guard", {"matcher": "Bash|Edit|Write|MultiEdit",
+                                         "hooks": [{"type": "command", "command": GATE_IN_HOOK + " --guard"}]}))
+    added = []
+    for event, mode, entry in wanted:
         existing = hooks.setdefault(event, [])
-        if not any(json.dumps(e, sort_keys=True) == json.dumps(entry, sort_keys=True) for e in existing):
+        if not has_cleat_hook(existing, mode):
             existing.append(entry)
-            changed = True
-    if not changed:
+            added.append(event)
+    if not added:
         plan.say(rel, "kept (hooks already wired)")
         return
-    plan.say(rel, "hooks added" if os.path.isfile(path) else "written")
+    plan.say(rel, "%s hook%s added" % (" and ".join(added), "s" if len(added) > 1 else "") if os.path.isfile(path) else "written")
     if not dry_run:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as handle:

@@ -174,6 +174,20 @@ check_contains("the unlisted file is named", "scripts/test_orphan.py", err)
 check_equal("the default test-* files are not swept under a custom pattern",
             0, err.count("test-a.py") + err.count("test-b.py") + err.count("test-c.py"))
 
+# --- A run.sh entry stands for every suite in its directory ------------------
+
+code, out, err = run(fixture(entries=["quality/tests/run.sh", "scripts/test-b.py", "scripts/tools/test-c.py"],
+                             extra_suites=["quality/tests/test-z.py", "quality/tests/nested/test-deep.py"], exempt={}))
+check_equal("a directory's run.sh in PREFLIGHT wires every suite under that directory", 0, code)
+check_contains("and they are counted as checked", "all 6 guard suite(s)", out)
+code, out, err = run(fixture(entries=["quality/tests/run.sh", "scripts/test-b.py", "scripts/tools/test-c.py"]))
+check_equal("an exempt suite that run.sh now runs is a stale exemption, as a listed one would be", 1, code)
+check_contains("named as now running", "test-dormant.py", err)
+code, out, err = run(fixture(entries=["scripts/run.sh", "scripts/test-b.py", "scripts/tools/test-c.py"],
+                             extra_suites=["quality/tests/test-z.py"]))
+check_equal("a run.sh elsewhere does not wire suites outside its directory", 1, code)
+check_contains("the suite it does not cover is named", "quality/tests/test-z.py", err)
+
 # --- The green shape --------------------------------------------------------
 
 code, out, err = run(fixture())

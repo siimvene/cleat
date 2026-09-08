@@ -15,7 +15,9 @@ This reads `PREFLIGHT` out of `scripts/run-unit-suite.sh` as text rather than
 importing or running it — the array is bash, not Python, and the point is to
 read what a preflight run would read, not to re-derive it. Every entry is a
 quoted command; the first word of each is the path it runs, whatever flags
-follow (`--quiet`, and the like). That set of paths is compared against every
+follow (`--quiet`, and the like). An entry that is a directory's `run.sh`
+stands for every suite in that directory — cleat's own `quality/tests/run.sh`
+runs every suite beside it. That set of paths is compared against every
 `test-*.py` and `test-*.sh` file found anywhere beneath each swept root, not
 only at its top level — a suite one directory deeper is exactly the shape of
 drift this check exists to end. A root listed both as a parent and as one of
@@ -151,6 +153,18 @@ def parse_preflight(text):
     if not entries:
         raise ValueError("PREFLIGHT array is empty")
     return [entry.split()[0] for entry in entries]
+
+
+def _run_by_runners(entry_paths, known, settings):
+    """The suites a `run.sh` entry stands for: every suite in that script's directory.
+    cleat's `quality/tests/run.sh` runs every suite beside it, so one PREFLIGHT entry
+    wires them all — listing each of them by hand is the drift this check exists to end."""
+    covered = set()
+    for entry in entry_paths:
+        if os.path.basename(entry) == "run.sh":
+            prefix = os.path.dirname(entry) + os.sep
+            covered |= {path for path in known if path.startswith(prefix)}
+    return covered
 
 
 def _is_suite_file(path, name, patterns=DEFAULT_PATTERNS):
@@ -290,6 +304,7 @@ def judge(settings):
 
     swept = swept_suites(settings)
     known = {repo_path(suite) for suite in swept}
+    entry_paths |= _run_by_runners(entry_paths, known, settings)
 
     stale_not_suites = _stale_entries(settings.not_suites, known)
 

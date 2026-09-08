@@ -4,6 +4,15 @@ Newest first. A line per gate or behavior change; policy changes to this reposit
 
 ## Unreleased
 
+- An end-to-end fixture for the Rust raw-string mask: a `r#"…"#` whose quotes and apostrophes interleave makes lizard lose every function after it; the reader reports all of them, and the fixture asserts it is still hostile unmasked.
+- The Rust test-module reader blanks raw strings, strings and comments before counting braces, so a multi-line `r#"…"#` inside `mod tests` no longer ends the module early.
+- `attach --refresh` keeps a project's own scripts inside `quality/bin` and `quality/tests`; only files the template retired are dropped, and a retired name marked "Not part of cleat's template" is kept as the project's.
+- guard-suites: a `run.sh` entry in the preflight array stands for every suite in its directory, so cleat's own suites are wired by one entry.
+- Attach recognises a cleat hook a project wired its own way (another path spelling, a guard in front) and never adds a second.
+- Every walker shares one skip list and prunes nested git checkouts (a worktree under the tree), so a worktree's copies never make a cited bare filename ambiguous.
+- `CLEAT_HOOKS=off` stands the Stop hook and the guard down for a session that only reads.
+- A single-measurement gate (the duplication share) treats an improvement as a note under `--strict`, never a failure; any ordinary diff moves a share.
+- `commands`: the project's own checks in quality.json, run by `gate.py` beside cleat's with `needs` for their tools, so no wrapper script has to list gates.
 - Attach writes the hook commands with the gate script resolved from the project's git top level (via `CLAUDE_PROJECT_DIR`) instead of a working-directory-relative path. A hook runs in the tool shell's current directory, which keeps the agent's last `cd`; the relative path then failed to start and Claude Code read that as a denial of every Bash, Edit and Write call — "permission denied" across two projects' agent runs. Re-run attach over an attached project to rewrite its hooks; `--refresh` leaves settings alone.
 - `--only` (what `gate.py --changed` hands the scoped gates) keeps to the configured sources: a changed file outside every source — a test tree, tooling the config never named — was measured with no baseline entries to match, so all of its standing debt read as new and the Stop hook refused every stop on a branch that touched one. The same for a file of a language the section does not read (a shell script under a source configured for Python), which lizard measures when handed the path outright. Complexity now drops both before measuring; tests pin each.
 - New gates: conventions (a project's own rules as regexes with a message at the site, ratcheted by site) and dead-symbols (declared names nothing references, through ast-grep; a report by default).

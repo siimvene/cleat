@@ -85,6 +85,7 @@ try:
     code, out = run(config, "--repo-only")
     check("--repo-only skips the changed-lines judgment but still fails on density", code == 1 and "overlap" not in out and "got worse" in out, out)
 
+
     lines = changed.changed_lines(repo, changed.base_ref(repo))
     check("changed lines come from the diff against the base", lines.get("src/c.py") == set(range(6, 19)), str(lines))
     write(os.path.join(repo, "src", "new.py"), "x = 1\ny = 2\n")
@@ -93,6 +94,10 @@ try:
     os.remove(os.path.join(repo, "src", "new.py"))
 
     git(repo, "checkout", "-q", "--", "src/c.py")
+    write(os.path.join(repo, "src", "d.py"), "\n".join("v%d = %d" % (i, i) for i in range(40)) + "\n")   # ordinary code: the share falls
+    code, out = run(config, "--repo-only", "--strict")
+    check("a share that improved is a NOTE and never a --strict failure — any ordinary diff moves it", code == 0 and "improved" in out and "looser than the code" not in out, out)
+    os.remove(os.path.join(repo, "src", "d.py"))
     report = os.path.join(repo, "jscpd.json")
     write(report, json.dumps({"duplicates": [{"lines": 7, "firstFile": {"name": "src/a.py", "start": 3, "end": 9},
                                                "secondFile": {"name": os.path.join(repo, "src", "b.py"), "start": 3, "end": 9}}]}))
