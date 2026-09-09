@@ -90,6 +90,7 @@ def main():
     parser = argparse.ArgumentParser(description="fail on a new site that breaks one of the project's rules")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--write-baseline", action="store_true")
+    ratchet.add_tighten_argument(parser)
     ratchet.add_only_argument(parser)
     ratchet.add_strict_argument(parser)
     quality_config.add_config_argument(parser)
@@ -108,13 +109,15 @@ def main():
         ratchet.write(baseline_path, found, measured)
         print("baseline written: %d site(s) accepted across %d rule(s)" % (len(found), len(rules)))
         return 0
+    if args.tighten:
+        return ratchet.tighten(baseline_path, found, ["count"], measured)
     entries, stored = ratchet.read(baseline_path)
     found, entries = ratchet.restrict(found, entries, args.only)
     verdict = ratchet.judge(found, entries, ["count"], stored, measured)
     gate = ratchet.Gate(
         noun="site(s)", over="breaking a convention of this project",
         fix=fix_for(verdict, rules),
-        remedy="quality/bin/check-conventions.py --write-baseline",
+        remedy="quality/bin/check-conventions.py --tighten",
         show=lambda v: "%s%s" % (v.get("rule", "?"), " x%d" % v["count"] if v.get("count", 1) > 1 else ""))
     ok_line = "OK: %d convention site(s) in the tree, all %d in the baseline" % (len(found), len(found))
     return ratchet.report(verdict, gate, len(entries), ok_line, quiet=args.quiet, strict=args.strict)

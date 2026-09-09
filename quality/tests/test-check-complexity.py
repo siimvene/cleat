@@ -130,16 +130,21 @@ try:
     longer_csv = os.path.join(tmp, "longer.csv"); write_csv(longer_csv, longer)
     code, out = run(config, "--csv", longer_csv)
     check("a baselined function whose length grew fails too", code == 1 and "cc 1, 70 lines, was cc 1, 61 lines" in out, out)
+    before = open(baseline).read()
+    code, out = run(config, "--csv", longer_csv, "--tighten")
+    check("--tighten refuses to accept a function that got worse, and leaves the file alone",
+          code == 1 and "REFUSED" in out and "1 worse" in out and open(baseline).read() == before, out)
 
     # --- improved: the baseline records more than the code has — a NOTE, and a --strict failure
     run(config, "--csv", worse_csv, "--write-baseline")
     code, out = run(config, "--csv", csv_path)
     check("a baselined function that improved still passes", code == 0, out)
     check("the improvement is noted, with the tightening command",
-          "improved" in out and "cc 9, 1 lines, baseline says cc 12, 1 lines" in out and "--write-baseline" in out, out)
+          "improved" in out and "cc 9, 1 lines, baseline says cc 12, 1 lines" in out and "--tighten" in out and "--write-baseline" not in out, out)
     code, out = run(config, "--csv", csv_path, "--strict")
     check("--strict refuses a baseline looser than the code", code == 1 and "looser than the code" in out, out)
-    run(config, "--csv", csv_path, "--write-baseline")
+    code, out = run(config, "--csv", csv_path, "--tighten")
+    check("--tighten lowers the improved entry", code == 0 and "baseline tightened: 1 improved, 0 stale entries dropped" in out, out)
     code, out = run(config, "--csv", csv_path, "--strict")
     check("once tightened, --strict passes", code == 0, out)
 

@@ -30,10 +30,11 @@ than silently compared against. Both are NOTEs, and failures under
 `--strict`.
 
 The failure output says what fixes the code. It does not print the command
-that accepts the debt: rewriting a baseline is a policy decision for a
-person, and printing it beside the failure makes it the first thing an agent
-reaches for. That command appears only in the NOTEs, where running it can
-only tighten.
+that accepts the debt (`--write-baseline`): rewriting a baseline upward is a policy
+decision for a person, and printing it beside the failure makes it the first
+thing an agent reaches for. The NOTEs print `--tighten` instead: the same
+rewrite, but `tighten()` refuses it whenever a finding is new or a value went
+up, so an agent (or its hook) may run it freely — the file can only get tighter.
 
 Baseline files are read in two shapes: the original bare list of entries, and
 `{"provenance": {…}, "entries": […]}`, which is what `write()` produces.
@@ -106,6 +107,32 @@ def write(path, findings, provenance):
     with open(path, "w") as handle:
         json.dump({"provenance": provenance, "entries": [f.entry() for f in findings]}, handle, indent=1)
         handle.write("\n")
+
+
+def tighten(path, findings, metrics, provenance):
+    """Rewrite the baseline at `path` to what the code has now, in the one direction the
+    ratchet allows. Refused — exit 1, nothing written — when any finding is new or any
+    ratcheted value went up: that would accept debt, which is `--write-baseline`, a person's
+    decision. Otherwise improved values come down, stale entries drop, the provenance is
+    refreshed, and the exit is 0. Safe for an agent to run: it can only lower the file."""
+    entries, stored = read(path)
+    verdict = judge(findings, entries, metrics, stored, provenance)
+    if verdict.failed:
+        print("REFUSED: --tighten only lowers a baseline, and this run would accept debt (%d new, %d worse). "
+              "Fix the code the gate names; accepting it is a person's `--write-baseline`." % (len(verdict.new), len(verdict.worsened)))
+        return 1
+    write(path, findings, provenance)
+    dropped = len(verdict.stale)
+    print("baseline tightened: %d improved, %d stale entr%s dropped%s" % (
+        len(verdict.improved), dropped, "y" if dropped == 1 else "ies",
+        "; provenance refreshed" if verdict.drift else ""))
+    return 0
+
+
+def add_tighten_argument(parser):
+    parser.add_argument("--tighten", action="store_true",
+                        help="rewrite the baseline only where the code got better (improved values down, stale entries "
+                             "out); refused when anything is new or worse — the agent-safe counterpart of --write-baseline")
 
 
 def config_hash(config):

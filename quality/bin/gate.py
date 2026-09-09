@@ -90,8 +90,10 @@ LISTABLE = {"crap", "sarif", "public_api", "inventory"}
 RETIRED = {"features_map": "split into \"doc_citations\" (the map's citations) and \"reachability\" (the services nothing constructs)"}
 
 # What --guard refuses: a command that rewrites accepted debt or edits policy —
-# writing a baseline, or a shell edit/copy/redirect aimed at quality.json, the
-# baselines, the gates, CODEOWNERS or the agent settings. Running a gate is fine.
+# --write-baseline (which can accept debt), or a shell edit/copy/redirect aimed at
+# quality.json, the baselines, the gates, CODEOWNERS or the agent settings. Running
+# a gate is fine, and so is --tighten: ratchet.tighten() refuses to write anything
+# but a lower number, so an agent answering the gate's own NOTE needs no person.
 POLICY_PATHS = r"(?:quality\.json|quality/|\.github/CODEOWNERS|\.claude/settings)"
 GUARDED_COMMAND_RE = re.compile(
     r"--write-baseline"

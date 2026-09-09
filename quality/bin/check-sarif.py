@@ -69,6 +69,7 @@ def main():
     parser = argparse.ArgumentParser(description="fail on a new SARIF result")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--write-baseline", action="store_true")
+    ratchet.add_tighten_argument(parser)
     parser.add_argument("--gate", help="which entry of the sarif list")
     parser.add_argument("--report", help="a SARIF file to judge (default: the gate's report glob, newest match)")
     parser.add_argument("--baseline", help="the ratchet file (default: the gate's baseline)")
@@ -87,13 +88,15 @@ def main():
         ratchet.write(baseline_path, found, measured)
         print("baseline written: %d result site(s) accepted from %s" % (len(found), report_path))
         return 0
+    if args.tighten:
+        return ratchet.tighten(baseline_path, found, ["count"], measured)
     entries, stored = ratchet.read(baseline_path)
     verdict = ratchet.judge(found, entries, ["count"], stored, measured)
     gate = ratchet.Gate(
         noun="%s result(s)" % name, over="the scanner reported",
         fix="Fix what each result names — the scanner's message says what. Accepting a result into the "
             "baseline is a policy decision for a person — see quality/README.md.",
-        remedy="quality/bin/check-sarif.py --gate %s --write-baseline" % name,
+        remedy="quality/bin/check-sarif.py --gate %s --tighten" % name,
         show=lambda v: "x%d" % v["count"] if v.get("count", 1) > 1 else "",
         brief=lambda v: "x%d" % v.get("count", 1) if v.get("count", 1) > 1 else "")
     ok_line = "OK: %d %s result site(s), all %d in the baseline — read from %s" % (len(found), name, len(found), report_path)

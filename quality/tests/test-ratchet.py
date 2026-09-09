@@ -135,4 +135,33 @@ clean = ratchet.judge([findings[4]], [entries[3]], ["cc"])
 code, out = report(clean, quiet=True, strict=True)
 check("a clean --quiet --strict run prints nothing and exits 0", code == 0 and out == "", repr(out))
 
+
+# ---- tighten(): the rewrite an agent may run — refused whenever it would accept debt
+def tighten(path, found, prov):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = ratchet.tighten(path, found, ["cc"], prov)
+    return code, out.getvalue()
+
+
+tmp = tempfile.mkdtemp(prefix="ratchet-tighten-")
+try:
+    path = os.path.join(tmp, "b.json")
+    prov1, prov2 = ratchet.provenance("t", "1", {"cc": 8}), ratchet.provenance("t", "2", {"cc": 8})
+    ratchet.write(path, [F("d.py", 3, "def d():", {"cc": 12}), F("g.py", 1, "def g():", {"cc": 20})], prov1)
+    before = open(path).read()
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 12}), F("x.py", 1, "def x():", {"cc": 9})], prov1)
+    check("tighten refuses a new finding and writes nothing", code == 1 and "REFUSED" in out and "1 new" in out and open(path).read() == before, out)
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 13}), F("g.py", 1, "def g():", {"cc": 20})], prov1)
+    check("tighten refuses a value that went up and writes nothing", code == 1 and "1 worse" in out and open(path).read() == before, out)
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 9})], prov2)
+    entries, stored = ratchet.read(path)
+    check("tighten lowers the improved entry, drops the stale one and refreshes provenance",
+          code == 0 and "1 improved, 1 stale entry dropped; provenance refreshed" in out
+          and entries == [{"file": "d.py", "text": "def d():", "line": 3, "cc": 9}] and stored == prov2, out + str(entries))
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 9})], prov2)
+    check("tighten on an exact baseline is a no-op rewrite that still exits 0", code == 0 and "0 improved, 0 stale" in out, out)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
 suite.finish()

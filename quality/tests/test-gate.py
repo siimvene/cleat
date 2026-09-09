@@ -177,6 +177,7 @@ try:
     allowed = [
         {"tool_name": "Bash", "tool_input": {"command": "python3 quality/bin/gate.py --strict"}},
         {"tool_name": "Bash", "tool_input": {"command": "python3 quality/bin/check-escapes.py"}},
+        {"tool_name": "Bash", "tool_input": {"command": "python3 quality/bin/check-duplication.py --tighten"}},
         {"tool_name": "Bash", "tool_input": {"command": "cat quality.json"}},
         {"tool_name": "Bash", "tool_input": {"command": "git diff quality/"}},
         {"tool_name": "Edit", "tool_input": {"file_path": "/repo/src/quality_of_life.py"}},
