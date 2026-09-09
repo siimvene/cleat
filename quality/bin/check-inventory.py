@@ -81,7 +81,6 @@ def main():
     parser = argparse.ArgumentParser(description="fail when a directory that must not shrink loses an entry")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--write-baseline", action="store_true")
-    ratchet.add_tighten_argument(parser)
     parser.add_argument("--gate", help="which entry of the inventory list")
     ratchet.add_strict_argument(parser)
     quality_config.add_config_argument(parser)
@@ -100,12 +99,11 @@ def main():
         ratchet.write(baseline_path, found, measured)
         print("baseline written: %d entr%s under %s recorded" % (len(found), "y" if len(found) == 1 else "ies", entry["path"]))
         return 0
-    if args.tighten:
-        return ratchet.tighten(baseline_path, found, [], measured)
     entries, stored = ratchet.read(baseline_path)
     verdict = ratchet.judge(found, entries, [], stored, measured)
-    # Additions are recorded, never "tightened" (ratchet.tighten refuses new entries), so the
-    # remedy stays the recording command; --tighten is still accepted to drop stale entries.
+    # No --tighten here: this ratchet runs the other way — a STALE entry (a lost registry
+    # entry, a removed signature) is the failure, and ratchet.tighten() drops stale entries.
+    # Additions are recorded with the recording command, a person's step.
     remedy = "quality/bin/check-inventory.py%s --write-baseline" % (" --gate %s" % name if args.gate else "")
     return report(verdict, name, entry["path"], len(entries), args.quiet, args.strict, remedy)
 
