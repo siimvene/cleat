@@ -110,7 +110,7 @@ def main():
         print("baseline written: %d site(s) accepted across %d rule(s)" % (len(found), len(rules)))
         return 0
     if args.tighten:
-        return ratchet.tighten(baseline_path, found, ["count"], measured)
+        return ratchet.tighten(baseline_path, found, ["count"], measured, only=args.only)
     entries, stored = ratchet.read(baseline_path)
     found, entries = ratchet.restrict(found, entries, args.only)
     verdict = ratchet.judge(found, entries, ["count"], stored, measured)

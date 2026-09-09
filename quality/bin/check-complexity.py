@@ -138,7 +138,7 @@ def main():
               % (len(over), cc_ceiling, line_ceiling))
         return 0
     if args.tighten:
-        return ratchet.tighten(baseline_path, over, ["cc", "lines"], measured)
+        return ratchet.tighten(baseline_path, over, ["cc", "lines"], measured, only=args.only)
 
     entries, stored = ratchet.read(baseline_path)
     over, entries = ratchet.restrict(over, entries, args.only)

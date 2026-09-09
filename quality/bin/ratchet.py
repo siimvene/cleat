@@ -104,18 +104,39 @@ def read(path):
 
 
 def write(path, findings, provenance):
-    with open(path, "w") as handle:
+    """Write the baseline atomically: a sibling temp file, then os.replace, so a reader
+    (or a second writer) never sees a half-written file."""
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    with open(tmp, "w") as handle:
         json.dump({"provenance": provenance, "entries": [f.entry() for f in findings]}, handle, indent=1)
         handle.write("\n")
+    os.replace(tmp, path)
 
 
-def tighten(path, findings, metrics, provenance):
+def tighten(path, findings, metrics, provenance, only=None):
     """Rewrite the baseline at `path` to what the code has now, in the one direction the
     ratchet allows. Refused — exit 1, nothing written — when any finding is new or any
-    ratcheted value went up: that would accept debt, which is `--write-baseline`, a person's
-    decision. Otherwise improved values come down, stale entries drop, the provenance is
-    refreshed, and the exit is 0. Safe for an agent to run: it can only lower the file."""
+    ratcheted value went up (that would accept debt, which is `--write-baseline`, a person's
+    decision), and in every situation where "lower" cannot be judged: the target is not
+    a baseline this engine wrote (no recorded provenance — a bare list, a settings file,
+    anything a flag or a config could point here), the run's provenance differs from the
+    file's (another tool, version or gate configuration: the numbers are not
+    comparable, and dropping what a different measurement no longer sees is not a
+    tightening), or the run was scoped with --only (every unselected file's entry would
+    read as stale). Otherwise improved values come down, stale entries drop, and the
+    exit is 0. Safe for an agent to run: it can only lower a baseline it recognises."""
+    if only:
+        print("REFUSED: --tighten judges the whole tree; drop --only.")
+        return 1
     entries, stored = read(path)
+    if not stored:
+        print("REFUSED: %s is not a baseline this engine wrote (no recorded provenance); --tighten only lowers "
+              "an existing one. A first baseline is a person's `--write-baseline`." % path)
+        return 1
+    drift = drift_between(stored, provenance)
+    if drift:
+        print("REFUSED: %s — --tighten does not re-baseline under a different measurement; a person decides with `--write-baseline`." % drift)
+        return 1
     verdict = judge(findings, entries, metrics, stored, provenance)
     if verdict.failed:
         print("REFUSED: --tighten only lowers a baseline, and this run would accept debt (%d new, %d worse). "
@@ -123,9 +144,8 @@ def tighten(path, findings, metrics, provenance):
         return 1
     write(path, findings, provenance)
     dropped = len(verdict.stale)
-    print("baseline tightened: %d improved, %d stale entr%s dropped%s" % (
-        len(verdict.improved), dropped, "y" if dropped == 1 else "ies",
-        "; provenance refreshed" if verdict.drift else ""))
+    print("baseline tightened: %d improved, %d stale entr%s dropped" % (
+        len(verdict.improved), dropped, "y" if dropped == 1 else "ies"))
     return 0
 
 
@@ -297,8 +317,9 @@ def _print_listed(heading, rows):
 
 def _print_notes(verdict, gate, offer_remedy):
     """Every way the baseline is looser than the code — and, on a passing run only, the
-    command that tightens it. Beside a failure that same command would also accept the
-    new debt, so there it is not printed."""
+    command that tightens it. Beside a failure it is not printed: --tighten would refuse
+    to run there (it accepts nothing new or worse), and the first thing an agent reaches
+    for beside a red gate should be the fix, not a baseline command."""
     if verdict.stale:
         n = len(verdict.stale)
         _print_listed("NOTE: %d baseline entr%s matched nothing this run — fixed, split, renamed or deleted:"
