@@ -312,6 +312,7 @@ def main():
     parser = argparse.ArgumentParser(description="CRAP over the configured sources, against a baseline")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--write-baseline", action="store_true")
+    ratchet.add_tighten_argument(parser)
     parser.add_argument("--threshold", type=float, help="the gate (default: crap.threshold)")
     parser.add_argument("--xccov", help="an xccov --report --json file (default: the newest crap.xccov.bundles match, through xcrun)")
     parser.add_argument("--bundle", help="an .xcresult bundle to read through xcrun, skipping the crap.xccov.bundles glob (default: the newest match)")
@@ -381,6 +382,8 @@ def gate(args, settings):
         ratchet.write(baseline_path, over, measured)
         print("baseline written: %d function(s) over CRAP %g" % (len(over), threshold))
         return 0
+    if args.tighten:
+        return ratchet.tighten(baseline_path, over, ["crap"], measured)
     entries, stored = ratchet.read(baseline_path)
     verdict = ratchet.judge(over, entries, ["crap"], stored, measured)
     gate = ratchet.Gate(
@@ -388,7 +391,7 @@ def gate(args, settings):
         over="over CRAP %g — complexity the tests do not pay for" % threshold,
         fix="Cover the untested paths or split the function so each piece is under the gate. Accepting new "
             "debt into the baseline is a policy decision for a person, not a fix — see quality/README.md.",
-        remedy="quality/bin/check-crap.py --write-baseline" + (" --gate %s" % settings.gate if settings.gate else ""),
+        remedy="quality/bin/check-crap.py --tighten" + (" --gate %s" % settings.gate if settings.gate else ""),
         show=lambda v: "crap %.0f (cc %d, coverage %.0f%%)" % (v["crap"], v["cc"], v["coverage"] * 100),
         brief=lambda v: "crap %s" % v["crap"])
     ok_line = ("OK: %d functions judged, %d over CRAP %g, all %d in the baseline — read from %s"

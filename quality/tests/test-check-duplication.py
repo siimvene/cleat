@@ -84,6 +84,16 @@ try:
     check("the failure output never prints the accept command", "--write-baseline" not in out, out)
     code, out = run(config, "--repo-only")
     check("--repo-only skips the changed-lines judgment but still fails on density", code == 1 and "overlap" not in out and "got worse" in out, out)
+    baseline_file = os.path.join(repo, "duplication-baseline.json")
+    before = open(baseline_file).read()
+    code, out = run(config, "--tighten")
+    check("--tighten refuses a density that rose and leaves the baseline alone", code == 1 and "REFUSED" in out and open(baseline_file).read() == before, out)
+    write(c, "def other():\n" + "".join("    v%d = %d\n" % (i, i) for i in range(30)) + "    return 0\n")
+    code, out = run(config, "--tighten")
+    check("--tighten lowers the baseline when the density fell", code == 0 and "baseline tightened: 1 improved" in out
+          and json.load(open(baseline_file))["entries"][0]["percent"] < 74.07, out)
+    git(repo, "checkout", "-q", "--", "duplication-baseline.json")
+    write(c, "def other():\n    x = 1\n    y = 2\n    z = 3\n    return x + y + z\n\n\ndef total_c(items):\n    total = 0\n" + BLOCK + "    return total\n")
 
     lines = changed.changed_lines(repo, changed.base_ref(repo))
     check("changed lines come from the diff against the base", lines.get("src/c.py") == set(range(6, 19)), str(lines))

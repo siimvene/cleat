@@ -107,6 +107,7 @@ def main():
     parser = argparse.ArgumentParser(description="complexity ratchet over the configured sources")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--write-baseline", action="store_true")
+    ratchet.add_tighten_argument(parser)
     parser.add_argument("--csv", help="a saved lizard --csv output to judge instead of running a tool")
     parser.add_argument("--lint", help="a saved SwiftLint JSON report to judge instead of running a tool")
     parser.add_argument("--repo", help="paths are reported relative to this (default: the directory of quality.json)")
@@ -136,6 +137,8 @@ def main():
         print("baseline written: %d function(s) over the gate (cyclomatic > %d or body > %d lines)"
               % (len(over), cc_ceiling, line_ceiling))
         return 0
+    if args.tighten:
+        return ratchet.tighten(baseline_path, over, ["cc", "lines"], measured, only=args.only)
 
     entries, stored = ratchet.read(baseline_path)
     over, entries = ratchet.restrict(over, entries, args.only)
@@ -145,7 +148,7 @@ def main():
         over="over the complexity gate (cyclomatic > %d or body > %d lines)" % (cc_ceiling, line_ceiling),
         fix="Split the function so each piece is under the gate. Accepting new debt into the baseline is a "
             "policy decision for a person, not a fix — see quality/README.md.",
-        remedy="quality/bin/check-complexity.py --write-baseline",
+        remedy="quality/bin/check-complexity.py --tighten",
         show=lambda v: "cc %s, %s lines" % (v["cc"], v["lines"]))
     ok_line = ("OK: %d functions judged (%d inline tests skipped), %d over the gate, all %d in the baseline"
                % (len(functions), skipped, len(over), len(over)))

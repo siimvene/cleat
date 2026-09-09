@@ -87,9 +87,13 @@ try:
 
     write(py, "import os\n\nx = os.getcwd()  # type: ignore\ndef f():\n    try:\n        pass\n    except:\n        pass\n")
     code, out = run(config)
-    check("a removed site passes with a stale NOTE and the tightening command", code == 0 and "matched nothing" in out and "--write-baseline" in out, out)
+    check("a removed site passes with a stale NOTE and the tightening command", code == 0 and "matched nothing" in out and "--tighten" in out, out)
     code, out = run(config, "--strict")
     check("and fails under --strict", code == 1 and "looser than the code" in out, out)
+    code, out = run(config, "--tighten")
+    check("--tighten drops the stale entry", code == 0 and "1 stale entry dropped" in out, out)
+    code, out = run(config, "--strict")
+    check("after which --strict passes", code == 0, out)
 
     write(config, json.dumps({"escapes": dict(section, patterns={"todo bang": r"TODO!"})}))
     write(ts, "const a: any = 1;\n// @ts-ignore\nconst b = a!.c;\nit.skip('x', () => {});\nconst c = a as any;\n// TODO! later\n")

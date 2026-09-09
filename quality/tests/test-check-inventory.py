@@ -46,6 +46,8 @@ try:
     write(config, json.dumps({"inventory": [{"name": "gone", "path": "nowhere", "baseline": "b.json"}]}))
     code, out = run(config, "--gate", "gone")
     check("a missing directory is refused", code == 2 and "no such directory" in out, out)
+    code, out = run(config, "--gate", "sqlx", "--tighten")
+    check("--tighten is not an option here: a stale entry is this gate's failure, and tighten would drop it", code == 2, out)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

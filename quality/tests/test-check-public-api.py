@@ -95,6 +95,8 @@ try:
     check("an unknown language is refused naming the known ones", code == 2 and "cobol" in out and "typescript" in out, out)
     code, out = run(config, "--gate", "nope")
     check("an unknown gate name is refused", code == 2 and "core, web" in out, out)
+    code, out = run(config, "--gate", "sdk", "--tighten")
+    check("--tighten is not an option here: a removed signature is this gate's failure, and tighten would drop it", code == 2, out)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

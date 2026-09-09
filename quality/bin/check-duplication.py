@@ -115,7 +115,7 @@ GATE = ratchet.Gate(
     noun="measurement(s)", over="of duplication with no baseline yet",
     fix="Extract the copied blocks into shared functions until the share is back under the baseline. "
         "Accepting more duplication is a policy decision for a person — see quality/README.md.",
-    remedy="quality/bin/check-duplication.py --write-baseline",
+    remedy="quality/bin/check-duplication.py --tighten",
     show=lambda v: "%.2f%% duplicated (%s of %s lines)" % (v["percent"], v.get("duplicated_lines", "?"), v.get("total_lines", "?")),
     brief=lambda v: "%.2f%%" % v["percent"])
 
@@ -130,6 +130,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="fail on copied code in changed lines, and on rising duplication")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--write-baseline", action="store_true")
+    ratchet.add_tighten_argument(parser)
     parser.add_argument("--base", help="the ref changed lines are measured against")
     parser.add_argument("--repo-only", action="store_true", help="judge the density only")
     parser.add_argument("--changed-only", action="store_true", help="judge the changed-lines clones only, no baseline needed (gate.py --changed)")
@@ -176,6 +177,8 @@ def main():
         v = finding.values
         print("baseline written: %.2f%% of %d significant lines duplicated (%d clone pairs)" % (v["percent"], v["total_lines"], len(clones)))
         return 0
+    if args.tighten:
+        return ratchet.tighten(baseline_path, [finding], ["percent"], measured)
     return judge_all(args, section, config, baseline_path, finding, clones, measured)
 
 

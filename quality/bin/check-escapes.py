@@ -211,6 +211,7 @@ def main():
     parser = argparse.ArgumentParser(description="fail on a new site where the code opts out of a check")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--write-baseline", action="store_true")
+    ratchet.add_tighten_argument(parser)
     parser.add_argument("--list-languages", action="store_true", help="print the built-in pattern sets and exit")
     ratchet.add_only_argument(parser)
     ratchet.add_strict_argument(parser)
@@ -228,6 +229,8 @@ def main():
         ratchet.write(baseline_path, found, measured)
         print("baseline written: %d escape site(s) accepted" % len(found))
         return 0
+    if args.tighten:
+        return ratchet.tighten(baseline_path, found, ["count"], measured, only=args.only)
 
     entries, stored = ratchet.read(baseline_path)
     found, entries = ratchet.restrict(found, entries, args.only)
@@ -239,7 +242,7 @@ def main():
         over="where the code opts out of a type check, a lint rule, a test or an error",
         fix="Fix what the escape hides: give the value its real type, make the test pass or delete it, handle the "
             "error. Accepting a new escape into the baseline is a policy decision for a person — see quality/README.md.",
-        remedy="quality/bin/check-escapes.py --write-baseline",
+        remedy="quality/bin/check-escapes.py --tighten",
         show=with_count)
     ok_line = "OK: %d escape site(s) in the tree, all %d in the baseline%s" % (
         len(found), len(found), " (%d in inline Rust tests skipped)" % skipped if skipped else "")

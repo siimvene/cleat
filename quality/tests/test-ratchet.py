@@ -135,4 +135,50 @@ clean = ratchet.judge([findings[4]], [entries[3]], ["cc"])
 code, out = report(clean, quiet=True, strict=True)
 check("a clean --quiet --strict run prints nothing and exits 0", code == 0 and out == "", repr(out))
 
+
+# ---- tighten(): the rewrite an agent may run — refused whenever it would accept debt
+def tighten(path, found, prov):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = ratchet.tighten(path, found, ["cc"], prov)
+    return code, out.getvalue()
+
+
+tmp = tempfile.mkdtemp(prefix="ratchet-tighten-")
+try:
+    path = os.path.join(tmp, "b.json")
+    prov1, prov2 = ratchet.provenance("t", "1", {"cc": 8}), ratchet.provenance("t", "2", {"cc": 8})
+    ratchet.write(path, [F("d.py", 3, "def d():", {"cc": 12}), F("g.py", 1, "def g():", {"cc": 20})], prov1)
+    before = open(path).read()
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 12}), F("x.py", 1, "def x():", {"cc": 9})], prov1)
+    check("tighten refuses a new finding and writes nothing", code == 1 and "REFUSED" in out and "1 new" in out and open(path).read() == before, out)
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 13}), F("g.py", 1, "def g():", {"cc": 20})], prov1)
+    check("tighten refuses a value that went up and writes nothing", code == 1 and "1 worse" in out and open(path).read() == before, out)
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 9})], prov2)
+    check("tighten refuses under provenance drift (another version) and writes nothing",
+          code == 1 and "REFUSED" in out and "measured by t 1, this run by 2" in out and open(path).read() == before, out)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = ratchet.tighten(path, [F("d.py", 3, "def d():", {"cc": 9})], ["cc"], prov1, only=["d.py"])
+    check("tighten refuses a run scoped with --only and writes nothing", code == 1 and "drop --only" in out.getvalue() and open(path).read() == before, out.getvalue())
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 9})], prov1)
+    entries, stored = ratchet.read(path)
+    check("tighten lowers the improved entry and drops the stale one",
+          code == 0 and "1 improved, 1 stale entry dropped" in out
+          and entries == [{"file": "d.py", "text": "def d():", "line": 3, "cc": 9}] and stored == prov1, out + str(entries))
+    code, out = tighten(path, [F("d.py", 3, "def d():", {"cc": 9})], prov1)
+    check("tighten on an exact baseline is a no-op rewrite that still exits 0", code == 0 and "0 improved, 0 stale" in out, out)
+    check("write() leaves no temp file behind", [n for n in os.listdir(tmp) if n.endswith(".tmp")] == [], str(os.listdir(tmp)))
+    settings = os.path.join(tmp, "settings.json")
+    write(settings, json.dumps({"hooks": {"Stop": []}}))
+    code, out = tighten(settings, [], prov1)
+    check("tighten refuses a file that is not a baseline it wrote (a settings file pointed at by a flag) and leaves it alone",
+          code == 1 and "not a baseline this engine wrote" in out and json.load(open(settings)) == {"hooks": {"Stop": []}}, out)
+    legacy = os.path.join(tmp, "legacy.json")
+    write(legacy, json.dumps([{"file": "d.py", "text": "def d():", "line": 3, "cc": 12}]))
+    code, out = tighten(legacy, [F("d.py", 3, "def d():", {"cc": 9})], prov1)
+    check("tighten refuses a bare-list baseline with no provenance", code == 1 and "no recorded provenance" in out and json.load(open(legacy))[0]["cc"] == 12, out)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
 suite.finish()
