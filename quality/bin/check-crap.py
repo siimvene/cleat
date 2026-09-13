@@ -164,12 +164,26 @@ def crap(cc, coverage):
 
 # ---------------------------------------------------------------- the judgement
 
-def coverage_at(coverage, path, line):
-    """The coverage recorded for the declaration at `line` — on its own line, or on an
-    attribute line above it or the line its multi-line signature opens the body on
-    (SwiftLint reports the `func` line; xccov records the function elsewhere); 0.0 when
-    nothing recorded it."""
+def _from_spans(coverage, path, line, end):
+    """What an istanbul-shaped reader knows beyond its listed functions: the statements
+    in the function's own range, then the innermost listed function holding the line."""
+    if not hasattr(coverage, "over"):
+        return None
+    cov = coverage.over(path, line, end) if end else None
+    return cov if cov is not None else coverage.within(path, line)
+
+
+def coverage_at(coverage, path, line, end=None):
+    """The coverage for the declaration at `line`: a record on its own line; else, for a
+    function the report never listed (a nested arrow function or closure lizard
+    enumerates but istanbul folds into its parent), the statements in its own range or
+    the function holding it; else a record on an attribute line above or the line a
+    multi-line signature opens the body on (SwiftLint reports the `func` line, xccov
+    records the function elsewhere); 0.0 when nothing recorded anything."""
     cov = coverage.get((path, line))
+    if cov is not None:
+        return cov
+    cov = _from_spans(coverage, path, line, end)
     if cov is not None:
         return cov
     for candidate in coverage_reports.nearby_declaration_lines(path, line):
@@ -178,12 +192,12 @@ def coverage_at(coverage, path, line):
     return 0.0
 
 
-def judge(complexities, coverage, threshold, repo):
+def judge(complexities, coverage, threshold, repo, ends=None):
     """[(file relative to `repo`, line, text, cc, cov, crap)] for every function over the gate."""
     repo = os.path.realpath(repo)  # the files are realpaths; a symlinked repo must not relativise to ../../
     over = []
     for (path, line), cc in complexities.items():
-        cov = coverage_at(coverage, path, line)
+        cov = coverage_at(coverage, path, line, (ends or {}).get((path, line)))
         score = crap(cc, cov)
         if score > threshold:
             over.append((os.path.relpath(path, repo), line, complexity_readers.declaration_text(path, line), cc, cov, score))
@@ -195,27 +209,39 @@ class GateError(Exception):
     """A reason the gate cannot judge today; printed as FAIL, exit 2."""
 
 
+def _saved_functions(path, settings):
+    """A saved lizard run, kept to the gate's own sources — a run may cover every stack."""
+    with open(path) as handle:
+        functions, _ = complexity_readers.functions_from_csv(handle.read())
+    if not settings.has("complexity", "sources"):
+        return functions
+    roots = [os.path.join(os.path.realpath(r), "") for r in settings.config.paths(settings.value(None, "complexity", "sources"))]
+    return [f for f in functions if any(f.path.startswith(r) for r in roots)]
+
+
+def functions_for(args, settings):
+    """The measured functions, from --lizard-csv or lizard over `crap.complexity`; None
+    when SwiftLint is the reader."""
+    if args.lizard_csv:
+        return _saved_functions(args.lizard_csv, settings)
+    if settings.has("complexity", "tool") and settings.value(None, "complexity", "tool") == "lizard":
+        spec = settings.value(None, "complexity")
+        text = complexity_readers.run_lizard(settings.config.paths(spec["sources"]), spec["languages"], spec.get("exclude", []))
+        return complexity_readers.functions_from_csv(text, skip_rust_tests=spec.get("skip_rust_tests", True))[0]
+    return None
+
+
 def complexities_for(args, settings):
-    """From --lint (SwiftLint json) or --lizard-csv (a saved lizard run); else the reader
-    `crap.complexity.tool` names over its sources — lizard for Rust/TypeScript — or, with
-    no such key, SwiftLint over `crap.sources`."""
+    """({(file, line): cc}, {(file, line): end}) — from --lint (SwiftLint json, no ends),
+    a saved lizard run, or the reader `crap.complexity.tool` names; SwiftLint otherwise."""
     if args.lint:
         with open(args.lint) as handle:
-            return complexity_readers.complexities_from_swiftlint(json.load(handle))
-    if args.lizard_csv:
-        with open(args.lizard_csv) as handle:
-            functions, _ = complexity_readers.functions_from_csv(handle.read())
-        # a saved run may cover every stack; a gate judges only its own sources
-        if settings.has("complexity", "sources"):
-            roots = [os.path.join(os.path.realpath(r), "") for r in settings.config.paths(settings.value(None, "complexity", "sources"))]
-            functions = [f for f in functions if any(f.path.startswith(r) for r in roots)]
-        return complexity_readers.complexities(functions)
+            return complexity_readers.complexities_from_swiftlint(json.load(handle)), {}
     try:
-        if settings.has("complexity", "tool") and settings.value(None, "complexity", "tool") == "lizard":
-            spec = settings.value(None, "complexity")
-            return complexity_readers.lizard_complexities(settings.config.paths(spec["sources"]), spec["languages"],
-                                                          spec.get("exclude", []), spec.get("skip_rust_tests", True))
-        return complexity_readers.swiftlint_complexities(settings.config.paths(settings.value(None, "sources")))
+        functions = functions_for(args, settings)
+        if functions is not None:
+            return complexity_readers.complexities(functions), complexity_readers.ends(functions)
+        return complexity_readers.swiftlint_complexities(settings.config.paths(settings.value(None, "sources"))), {}
     except complexity_readers.ToolError as problem:
         raise GateError(str(problem))
 
@@ -367,14 +393,14 @@ def gather_coverage(args, settings):
 
 
 def gate(args, settings):
-    complexities = complexities_for(args, settings)
+    complexities, ends = complexities_for(args, settings)
     coverage, sources_read = gather_coverage(args, settings)
     threshold = float(settings.value(args.threshold, "threshold"))
     repo = os.path.abspath(args.repo) if args.repo else settings.root
     baseline_path = settings.path(args.baseline, "baseline")
 
     over = [ratchet.Finding(f, line, t, {"cc": cc, "coverage": round(cov, 2), "crap": round(score, 1)})
-            for f, line, t, cc, cov, score in judge(complexities, coverage, threshold, repo=repo)]
+            for f, line, t, cc, cov, score in judge(complexities, coverage, threshold, repo=repo, ends=ends)]
     section = {k: v for k, v in settings.section.items() if k != "baseline"} if settings.has() else {}
     measured = ratchet.provenance(complexity_tool(settings), None, section)
     if args.write_baseline:

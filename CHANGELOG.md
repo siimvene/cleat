@@ -4,6 +4,8 @@ Newest first. A line per gate or behavior change; policy changes to this reposit
 
 ## Unreleased
 
+- The CRAP suite's summary moved to its end: a failure in its lizard/istanbul half had printed and then been reported as passed.
+- CRAP over istanbul: a nested arrow function or closure lizard enumerates but istanbul folds into its parent is judged by the statements in its own range (then by the enclosing function), not read as 0% for want of a record.
 - An end-to-end fixture for the Rust raw-string mask: a `r#"…"#` whose quotes and apostrophes interleave makes lizard lose every function after it; the reader reports all of them, and the fixture asserts it is still hostile unmasked.
 - The Rust test-module reader blanks raw strings, strings and comments before counting braces, so a multi-line `r#"…"#` inside `mod tests` no longer ends the module early.
 - `attach --refresh` keeps a project's own scripts inside `quality/bin` and `quality/tests`; only files the template retired are dropped, and a retired name marked "Not part of cleat's template" is kept as the project's.
