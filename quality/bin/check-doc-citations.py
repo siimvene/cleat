@@ -26,6 +26,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import quality_config
+from extractors import patterns
 
 SECTION = "doc_citations"
 DEFAULT_EXTENSIONS = [".py", ".ts", ".tsx", ".js", ".jsx", ".swift", ".rs", ".go", ".kt", ".java", ".rb", ".sh",
@@ -47,16 +48,13 @@ def citations(text, extensions):
     return out
 
 
-SKIP_DIRS = {".git", "node_modules", "vendor", "build", ".build", "dist", "target", "__pycache__", ".venv", "venv"}
-
-
 def basenames_under(roots):
     """{basename: [repo paths]} for every file under the roots — a bare filename cited
-    without its directory resolves through this, when it is unique."""
+    without its directory resolves through this, when it is unique. A nested checkout
+    (a worktree under the tree) is not read: its copies are not this tree's files."""
     index = {}
     for root in roots:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        for dirpath, filenames in patterns.walk([root]):
             for name in filenames:
                 index.setdefault(name, []).append(os.path.relpath(os.path.join(dirpath, name), root))
     return index

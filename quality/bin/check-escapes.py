@@ -132,8 +132,7 @@ LANGUAGES = {
     },
 }
 
-DEFAULT_SKIP_DIRS = [".git", "node_modules", "vendor", "build", ".build", "dist", "target", "__pycache__",
-                     ".venv", "venv", "DerivedData", "Pods", "coverage", ".next", "out", "fixtures"]
+DEFAULT_SKIP_DIRS = patterns.DEFAULT_SKIP_DIRS   # the walker prunes these; the name stays for callers
 
 
 def language(name):
@@ -163,7 +162,7 @@ def findings(section, config):
     """Every escape site under the configured roots, one Finding per (file, line text),
     with how many times that line carries it."""
     roots = config.paths(section.get("roots", ["."]))
-    skip = set(DEFAULT_SKIP_DIRS) | set(section.get("skip_dirs", []))
+    skip = set(section.get("skip_dirs", []))
     exclude = section.get("exclude", [])
     skip_tests = section.get("skip_rust_tests", True)
     languages = [language(name) for name in section.get("languages", [])]

@@ -61,7 +61,7 @@ def sites_of(rule, config):
         raise KeyError("%s: every \"conventions.rules\" entry needs \"name\", \"pattern\" and \"message\"; got %r"
                        % (config.file, rule.get("name")))
     roots = config.paths(rule.get("roots", ["."]))
-    skip = set(check_escapes.DEFAULT_SKIP_DIRS) | set(rule.get("skip_dirs", []))
+    skip = set(rule.get("skip_dirs", []))
     files = patterns.files(roots, suffixes_for(rule), skip, rule.get("exclude", []))
     return [(rel, line, text) for rel, line, text, _ in patterns.sites(files, {rule["name"]: rule["pattern"]}, config.root)]
 

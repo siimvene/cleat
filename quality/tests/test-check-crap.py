@@ -305,8 +305,6 @@ try:
         coverage.XCCOV_TIMEOUT_SECONDS = old_xccov_timeout
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
-print()
-if failed: print("test-check-crap: %d case(s) failed." % failed); sys.exit(1)
 
 # --- The stacks SwiftLint does not read: lizard complexity, istanbul coverage, a gate list.
 tmp2 = tempfile.mkdtemp(prefix="check-crap-stacks-")
@@ -349,6 +347,15 @@ try:
         check("an xccov report naming nothing under the root is refused loudly", "none under" in str(error), str(error))
     x_mapped = coverage.from_xccov(x_elsewhere, os.path.join(tmp2, "App"), {"/work/": os.path.join(tmp2, "")})
     check("and reads with a path_map", list(x_mapped.values()) == [0.5], str(x_mapped))
+    # a nested arrow function: lizard enumerates it, istanbul's fnMap folds it into its parent —
+    # it is judged by the statements in its own range, never as 0% for want of a record
+    nested = {(os.path.realpath(web), 1): 9, (os.path.realpath(web), 2): 9, (os.path.realpath(web), 5): 1}
+    over = mod.judge(nested, cov, 8, tmp2, ends={(os.path.realpath(web), 2): 3})
+    check("a nested function istanbul never listed is judged by its own statement lines, not read as 0%",
+          [(o[1], round(o[4], 2)) for o in over if o[1] == 2] == [(2, 0.5)], str(over))
+    check("with no end known it takes the innermost enclosing function's coverage",
+          round(mod.coverage_at(cov, os.path.realpath(web), 3), 2) == 0.33, str(mod.coverage_at(cov, os.path.realpath(web), 3)))
+    check("a range holding no statement falls through to the enclosing function", round(mod.coverage_at(cov, os.path.realpath(web), 4, 4), 2) == 0.33)
     check("istanbul: a function's coverage is the share of its statements that ran", abs(cov[(os.path.realpath(web), 1)] - 1/3) < 1e-9, str(cov))
     check("istanbul: a function whose every statement ran is fully covered", cov[(os.path.realpath(web), 5)] == 1.0, str(cov))
     check("istanbul: files outside the root are not read", len(cov) == 2, str(cov))
@@ -395,4 +402,6 @@ try:
 finally:
     shutil.rmtree(tmp2, ignore_errors=True)
 
+print()
+if failed: print("test-check-crap: %d case(s) failed." % failed); sys.exit(1)
 print("test-check-crap: all cases passed.")

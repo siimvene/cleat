@@ -87,15 +87,27 @@ try:
     check("the existing settings are kept", settings["permissions"]["allow"] == ["Bash(ls:*)"], str(settings))
     stop = json.dumps(settings["hooks"].get("Stop"))
     pre = json.dumps(settings["hooks"].get("PreToolUse"))
-    check("the Stop hook runs the gates in hook mode", "gate.py --hook" in stop, stop)
+    stop_cmd = " ".join(h["command"] for e in settings["hooks"].get("Stop", []) for h in e.get("hooks", []))
+    check("the Stop hook runs the gates in hook mode, with the script anchored on the project top level",
+          'gate.py" --hook' in stop_cmd and "CLAUDE_PROJECT_DIR" in stop_cmd and "rev-parse --show-toplevel" in stop_cmd, stop_cmd)
     check("the run registry and the event log are gitignored", all(e in read(os.path.join(root, ".gitignore")) for e in ("quality/.running/", "quality/.events.jsonl")), read(os.path.join(root, ".gitignore")))
-    check("the PreToolUse guard is wired for the tools that change files", "gate.py --guard" in pre and "Bash" in pre and "Edit" in pre, pre)
+    pre_cmd = " ".join(h["command"] for e in settings["hooks"].get("PreToolUse", []) for h in e.get("hooks", []))
+    check("the PreToolUse guard is wired for the tools that change files, anchored the same way",
+          'gate.py" --guard' in pre_cmd and "CLAUDE_PROJECT_DIR" in pre_cmd and "Bash" in pre and "Edit" in pre, pre_cmd)
     claude_md = read(os.path.join(root, "CLAUDE.md"))
     check("the agent block is appended to CLAUDE.md, after what was there", claude_md.startswith("# Project") and "## Quality gates (cleat)" in claude_md and "--write-baseline" in claude_md, claude_md)
     check("the workflow runs the gates under --strict", "gate.py --strict" in read(os.path.join(root, ".github", "workflows", "cleat.yml")))
     codeowners = read(os.path.join(root, ".github", "CODEOWNERS"))
     check("CODEOWNERS names the origin's owner over the control plane", "@acme-org" in codeowners and "/quality.json" in codeowners and "/quality/" in codeowners, codeowners)
 
+    # a project that wired cleat's hooks its own way (a guard in front, another path spelling) keeps them: nothing is added twice
+    own = json.load(open(os.path.join(root, ".claude", "settings.json")))
+    own["hooks"]["Stop"] = [{"hooks": [{"type": "command", "command": "[ -n \"$REVIEWER\" ] && exit 0; python3 \"$(git rev-parse --show-toplevel)/quality/bin/gate.py\" --hook"}]}]
+    write(os.path.join(root, ".claude", "settings.json"), json.dumps(own))
+    code, out = run("--into", root)
+    after_hooks = json.load(open(os.path.join(root, ".claude", "settings.json")))["hooks"]
+    check("a hand-edited cleat hook is recognised by what it runs, not its exact text, and not duplicated",
+          code == 0 and len(after_hooks["Stop"]) == 1 and "REVIEWER" in json.dumps(after_hooks["Stop"]) and len(after_hooks["PreToolUse"]) == 1, json.dumps(after_hooks))
     before = {p: read(os.path.join(root, p)) for p in ("quality.json", "CLAUDE.md", ".claude/settings.json", ".github/CODEOWNERS")}
     code, out = run("--into", root)
     after = {p: read(os.path.join(root, p)) for p in before}
@@ -127,11 +139,14 @@ try:
     # ---- --refresh: the template's files replaced, the project's kept
     vendored_gate = os.path.join(root, "quality", "bin", "gate.py")
     write(vendored_gate, "# an older copy\n")
-    write(os.path.join(root, "quality", "bin", "check-retired.py"), "# a script the template no longer ships\n")
+    write(os.path.join(root, "quality", "bin", "check-complexity.sh"), "#!/bin/bash\n# the template's old SwiftLint gate\n")
+    write(os.path.join(root, "quality", "bin", "check-features-map.py"), "#!/usr/bin/env python3\n# Not part of cleat's template: this name is wired into the tree.\n")
+    write(os.path.join(root, "quality", "bin", "check-mine.py"), "# the project's own check, beside cleat's\n")
     write(os.path.join(root, "quality", "notes.md"), "the project's own notes\n")
     code, out = run("--into", root, "--refresh")
     check("--refresh replaces the template's files", code == 0 and "refreshed" in out and read(vendored_gate) == read(os.path.join(os.path.dirname(HERE), "bin", "gate.py")), out)
-    check("and drops what the template no longer ships", not os.path.exists(os.path.join(root, "quality", "bin", "check-retired.py")), out)
+    check("and drops a retired template file", not os.path.exists(os.path.join(root, "quality", "bin", "check-complexity.sh")) and "dropped what the template retired: check-complexity.sh" in out, out)
+    check("but keeps a retired name the project marked as its own, and the project's own script", os.path.isfile(os.path.join(root, "quality", "bin", "check-features-map.py")) and os.path.isfile(os.path.join(root, "quality", "bin", "check-mine.py")) and "kept the project's own: check-features-map.py, check-mine.py" in out, out)
     check("and keeps the baselines, the config and the project's own files",
           os.path.isfile(os.path.join(root, "quality", "escapes-baseline.json")) and os.path.isfile(os.path.join(root, "quality", "notes.md"))
           and read(os.path.join(root, "quality.json")) == before["quality.json"], out)

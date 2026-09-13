@@ -47,8 +47,11 @@ so attaching twice is safe. `--force` rewrites quality.json and the baselines.
 
 Upgrading a project that already carries a copy: `--refresh` replaces the
 template's own files — `bin/`, `tests/`, the two documents — with this
-checkout's, and keeps everything else under `quality/` (the baselines, a
-project's own additions beside them). `--add` puts the sections attach would
+checkout's, and keeps everything else under `quality/`: the baselines, and
+the project's own scripts inside `bin/` and `tests/` (a wrapper whose name
+its tooling is wired to). A file by a name the template retired is the old
+template file and is dropped, unless it says "Not part of cleat's template"
+in its header, which is how a project keeps a retired name as its own. `--add` puts the sections attach would
 generate today into an existing quality.json where they are missing, writes
 their baselines, and touches no section that is already there.
 """
@@ -73,7 +76,7 @@ _spec = importlib.util.spec_from_file_location("check_escapes", os.path.join(HER
 check_escapes = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(check_escapes)
 
-SKIP_DIRS = set(check_escapes.DEFAULT_SKIP_DIRS) | {"quality", ".claude", ".github", ".idea", ".vscode"}
+SKIP_DIRS = set(patterns.DEFAULT_SKIP_DIRS) | {"quality", ".claude", ".github", ".idea", ".vscode"}
 
 # The languages attach can recognise: suffixes → the escapes language, and lizard's -l name.
 LIZARD_NAMES = {"python": "python", "typescript": "typescript", "javascript": "javascript", "swift": "swift",
@@ -183,8 +186,8 @@ def _note_languages(counts, filenames):
             counts[language] = counts.get(language, 0) + 1
 
 
-def _kept(dirnames):
-    return sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
+def _kept(dirnames, dirpath="."):
+    return sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".") and not patterns.is_nested_checkout(os.path.join(dirpath, d)))
 
 
 def _outermost(tests):
@@ -201,7 +204,7 @@ def survey(plan):
     counts = {}
     tests = set()
     for dirpath, dirnames, filenames in os.walk(plan.root):
-        dirnames[:] = _kept(dirnames)
+        dirnames[:] = _kept(dirnames, dirpath)
         _note_tests(tests, os.path.relpath(dirpath, plan.root), dirnames)
         _note_languages(counts, filenames)
     plan.languages = dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
@@ -367,18 +370,56 @@ class Busy(Exception):
     """A gate or a suite is running from the copy --refresh would replace."""
 
 
-def _replace_part(source, target, part):
+# Template files cleat retired. A file by one of these names in a vendored copy is the
+# old template file — unless it says otherwise: a project that keeps the name as its own
+# wrapper (the name is wired into its tooling) marks the file with KEEP_MARKER.
+RETIRED_TEMPLATE_FILES = {"check-complexity.sh", "check-complexity-lizard.py", "lizard_reader.py", "check-features-map.py"}
+KEEP_MARKER = "Not part of cleat's template"
+
+
+def _project_owned(path, shipped):
+    """Whether a file in a vendored bin/ or tests/ is the project's own — not one the
+    template ships now, and not one it used to ship (unless marked as kept)."""
+    name = os.path.basename(path)
+    if name in shipped or name == "__pycache__":
+        return False
+    if name not in RETIRED_TEMPLATE_FILES:
+        return True
+    with open(path, errors="replace") as handle:
+        return KEEP_MARKER in handle.read(4000)
+
+
+def _refresh_dir(plan, src, dst):
+    """Replace the template's files in a vendored directory, keep the project's own,
+    drop the template's retired ones."""
+    shipped = set(os.listdir(src))
+    kept, dropped = [], []
+    for name in sorted(os.listdir(dst)):
+        path = os.path.join(dst, name)
+        if name in shipped:
+            continue
+        if _project_owned(path, shipped):
+            kept.append(name)
+        else:
+            dropped.append(name)
+            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+    shutil.copytree(src, dst, ignore=TEMPLATE_IGNORE, dirs_exist_ok=True)
+    rel = os.path.relpath(dst, plan.root)
+    if kept:
+        plan.say(rel, "kept the project's own: " + ", ".join(kept))
+    if dropped:
+        plan.say(rel, "dropped what the template retired: " + ", ".join(dropped))
+
+
+def _replace_part(plan, source, target, part):
     src, dst = os.path.join(source, part), os.path.join(target, part)
     if not os.path.exists(src):
         return
-    if os.path.isdir(dst):
-        shutil.rmtree(dst)
-    elif os.path.exists(dst):
-        os.remove(dst)
     if os.path.isdir(src):
-        shutil.copytree(src, dst, ignore=TEMPLATE_IGNORE)
-    else:
-        shutil.copy2(src, dst)
+        os.makedirs(dst, exist_ok=True)
+        _refresh_dir(plan, src, dst)
+        return
+    shutil.copy2(src, dst)
 
 
 def refresh(plan, source, target, dry_run):
@@ -393,7 +434,7 @@ def refresh(plan, source, target, dry_run):
     plan.say("quality/", "refreshed from %s (%s replaced; the rest kept)" % (source, ", ".join(TEMPLATE_PARTS)))
     if not dry_run:
         for part in TEMPLATE_PARTS:
-            _replace_part(source, target, part)
+            _replace_part(plan, source, target, part)
 
 
 def vendor(plan, dry_run, do_refresh=False):
@@ -413,16 +454,37 @@ def vendor(plan, dry_run, do_refresh=False):
         plan.say("quality/", "kept (already there — --refresh replaces the template's files)")
 
 
+# The gate script, resolved from the project's git top level rather than the
+# working directory: a hook runs in the tool shell's current directory, which
+# keeps the agent's last `cd`, and a relative path then fails to start — and
+# Claude Code reads a hook that failed to start as a denial of the call. Seen
+# as "permission denied" on every Bash, Edit and Write in two projects' agent
+# runs on 2026-09-05. CLAUDE_PROJECT_DIR is what Claude Code hands every hook;
+# the git top level covers a session started in a subdirectory of it.
+GATE_IN_HOOK = ('python3 "$(git -C "${CLAUDE_PROJECT_DIR:-.}" rev-parse --show-toplevel 2>/dev/null '
+                '|| printf %s "${CLAUDE_PROJECT_DIR:-.}")/quality/bin/gate.py"')
+
 GUARDED_TOOLS = ("Bash", "Edit", "Write")
+
+
+def _squash(match):
+    return re.sub(r"[\s;&|]", "_", match.group(0))
+
+
+def _one_word(command):
+    """`command` with the whitespace and separators inside a `$( )` or double quotes squashed
+    to `_`, so a path spelled through a subshell — attach's own, anchored on the git top
+    level — reads as one word to `invoked`, and a `||` inside it is not a short-circuit."""
+    return re.sub(r'"[^"]*"', _squash, re.sub(r"\$\([^()]*\)", _squash, command))
 
 
 def invoked(command, mode):
     """Whether `command` actually runs gate.py in `mode`: as the command, or after `;`, `&&`,
-    `then` or `do` — a PATH prefix or an existence guard around it still counts. Not after
-    `||`, inside a comment, or as the argument of echo: a string that only mentions the
-    gate must not pass for a hook that runs it."""
-    return re.search(r"(?:^|;|&&|\bthen|\bdo)\s*(?:PATH=\S+;?\s*)?python3?\s+\S*gate\.py\s+%s\b" % re.escape(mode),
-                     command) is not None
+    `then` or `do` — a PATH prefix, an existence guard or a subshell-anchored path around it
+    still counts. Not after `||`, inside a comment, or as the argument of echo: a string
+    that only mentions the gate must not pass for a hook that runs it."""
+    return re.search(r'(?:^|;|&&|\bthen|\bdo)\s*(?:PATH=\S+;?\s*)?python3?\s+\S*gate\.py"?\s+%s\b' % re.escape(mode),
+                     _one_word(command)) is not None
 
 
 def covers(entry, tools):
@@ -446,31 +508,28 @@ def wired(entries, mode, tools=()):
 def merge_settings(plan, dry_run):
     """Add the Stop and PreToolUse hooks to .claude/settings.json, keeping what is there. A
     hook that already runs gate.py in that mode counts as wired however the project wrapped
-    it (a PATH prefix, an existence guard): attach never appends a second, and names the
-    command it trusted so a person can see what it took for the gate."""
+    it (a PATH prefix, an existence guard, another path spelling): attach never appends a
+    second, and names the command it trusted so a person can see what it took for the gate."""
     rel = os.path.join(".claude", "settings.json")
     path = os.path.join(plan.root, rel)
-    settings = {}
-    if os.path.isfile(path):
-        with open(path) as handle:
-            settings = json.load(handle)
+    settings = json.loads(_read_if_exists(path) or "{}")
     hooks = settings.setdefault("hooks", {})
-    stop = {"hooks": [{"type": "command", "command": "python3 quality/bin/gate.py --hook --changed"}]}
-    guard = {"matcher": "Bash|Edit|Write|MultiEdit",
-             "hooks": [{"type": "command", "command": "python3 quality/bin/gate.py --guard"}]}
-    changed, trusted = False, []
-    for event, entry, mode, tools in (("Stop", stop, "--hook", ()), ("PreToolUse", guard, "--guard", GUARDED_TOOLS)):
+    wanted = (("Stop", "--hook", (), {"hooks": [{"type": "command", "command": GATE_IN_HOOK + " --hook --changed"}]}),
+              ("PreToolUse", "--guard", GUARDED_TOOLS,
+               {"matcher": "Bash|Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": GATE_IN_HOOK + " --guard"}]}))
+    added, trusted = [], []
+    for event, mode, tools, entry in wanted:
         existing = hooks.setdefault(event, [])
         command = wired(existing, mode, tools)
         if command is None:
             existing.append(entry)
-            changed = True
+            added.append(event)
         else:
             trusted.append("%s: `%s`" % (event, command))
-    if not changed:
+    if not added:
         plan.say(rel, "kept (hooks already wired — %s)" % "; ".join(trusted))
         return
-    plan.say(rel, "hooks added" if os.path.isfile(path) else "written")
+    plan.say(rel, "%s hook%s added" % (" and ".join(added), "s" if len(added) > 1 else "") if os.path.isfile(path) else "written")
     if not dry_run:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as handle:

@@ -60,7 +60,7 @@ DENSITY_KEY = "duplicated share of significant lines"
 
 def sources(section, config):
     roots = config.paths(section.get("roots", ["."]))
-    skip = set(check_escapes.DEFAULT_SKIP_DIRS) | set(section.get("skip_dirs", []))
+    skip = set(section.get("skip_dirs", []))
     suffixes = section.get("suffixes") or sorted(
         {s for name in section.get("languages", []) for s in check_escapes.language(name)["suffixes"]})
     if not suffixes:

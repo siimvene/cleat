@@ -11,20 +11,39 @@ import fnmatch
 import os
 import re
 
+# Directories no gate reads: dependencies, build output, caches, fixtures. Every walker
+# starts from this list; a section's `skip_dirs` adds to it.
+DEFAULT_SKIP_DIRS = frozenset({".git", "node_modules", "vendor", "build", ".build", "dist", "target", "__pycache__",
+                               ".venv", "venv", "DerivedData", "Pods", "coverage", ".next", "out", "fixtures"})
+
+
+def is_nested_checkout(path):
+    """A directory that is another git checkout — a worktree, a submodule, a clone
+    inside the tree. Its files belong to that checkout, not this one: read as this
+    one's, every bare filename in the tree would be ambiguous."""
+    return os.path.exists(os.path.join(path, ".git"))
+
+
+def walk(roots, skip_dirs=()):
+    """(dirpath, filenames) under `roots`, in sorted order, pruning `DEFAULT_SKIP_DIRS`,
+    `skip_dirs`, and any nested checkout other than a root itself."""
+    skip = DEFAULT_SKIP_DIRS | set(skip_dirs)
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in skip and not is_nested_checkout(os.path.join(dirpath, d)))
+            yield dirpath, sorted(filenames)
+
 
 def files(roots, suffixes, skip_dirs=(), exclude=()):
     """Every file under `roots` ending in one of `suffixes`, in walk order, skipping
     directories named in `skip_dirs` wherever they appear and files whose name or
     path matches an `exclude` glob (`*.test.ts`, `*/fixtures/*`)."""
     suffixes = tuple(suffixes)
-    skip = set(skip_dirs)
-    for root in roots:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in skip)
-            for name in sorted(filenames):
-                path = os.path.join(dirpath, name)
-                if name.endswith(suffixes) and not excluded(path, exclude):
-                    yield path
+    for dirpath, filenames in walk(roots, skip_dirs):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            if name.endswith(suffixes) and not excluded(path, exclude):
+                yield path
 
 
 def excluded(path, globs):
@@ -52,7 +71,17 @@ def sites(paths, patterns, repo_root, prepare=None):
 
 
 TEST_ATTRIBUTE = re.compile(r"^\s*#\[cfg\(test\)\]")
-CODE_ONLY = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*')
+# What is not code, for brace counting, tried at each position in this order: a raw
+# string (`r"…"`, `r#"…"#`, any number of hashes, spanning lines), a block comment, a
+# line comment, an ordinary string (which never spans a line — an unterminated one
+# ends at the newline, so a stray quote cannot swallow the rest of the file).
+NOT_CODE = re.compile(r'\br(#*)"[\s\S]*?"\1|/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"?')
+
+
+def _code_only(text):
+    """`text` with strings and comments blanked, newlines kept, so brace counting and
+    line numbering see only code."""
+    return NOT_CODE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
 
 
 def _ends_without_block(code):
@@ -62,10 +91,11 @@ def _ends_without_block(code):
 
 def _item_end(lines, start):
     """The last line of the item that begins after the attribute at `start`: the closing
-    brace of its block, or the line of the `;` that ends a block-less item."""
+    brace of its block, or the line of the `;` that ends a block-less item. `lines` is
+    code only — strings and comments already blanked."""
     depth, opened = 0, False
     for number in range(start, len(lines)):
-        code = CODE_ONLY.sub("", lines[number])
+        code = lines[number]
         if not opened and _ends_without_block(code):
             return number + 1
         depth += code.count("{") - code.count("}")
@@ -83,7 +113,7 @@ def rust_test_ranges(path):
         return []
     try:
         with open(path, errors="replace") as handle:
-            lines = handle.read().split("\n")
+            lines = _code_only(handle.read()).split("\n")
     except OSError:
         return []
     ranges, number = [], 0

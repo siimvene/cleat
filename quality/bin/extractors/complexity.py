@@ -180,6 +180,12 @@ def complexities(functions):
     return {(f.path, f.line): f.cc for f in functions}
 
 
+def ends(functions):
+    """{(realpath, line): last line} — a function's own range, for a coverage reader that
+    never listed it (a nested closure) and has to be asked what ran inside it."""
+    return {(f.path, f.line): f.end for f in functions}
+
+
 def lizard_version():
     """lizard's own version string, for baseline provenance; None when it cannot be asked."""
     try:

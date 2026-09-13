@@ -195,31 +195,50 @@ class Spanned(dict):
     def __init__(self):
         super().__init__()
         self.spans = {}
+        self.lines = {}   # {abs file: {statement line: hits}} — for a function the report never named
 
     def within(self, path, line):
         spans = self.spans.get(os.path.realpath(path), ())
         holding = [(end - start, cov) for start, end, cov in spans if start <= line <= end]
         return min(holding)[1] if holding else None
 
+    def over(self, path, start, end):
+        """The share of the statement lines in [start, end] that ran — how a function the
+        report does not list (a nested arrow function, a closure) is judged by what it
+        holds; None when no statement starts inside the range."""
+        hits = self.lines.get(os.path.realpath(path), {})
+        inside = [n for n in hits if start <= n <= end]
+        return (sum(1 for n in inside if hits[n] > 0) / len(inside)) if inside else None
+
+
+def _istanbul_entry(entry, path, out):
+    """One file's fnMap into `out`, its spans, and its statement lines."""
+    for fn_id, fn in entry.get("fnMap", {}).items():
+        found = _istanbul_function(entry, fn_id, fn)
+        if found:
+            out[(path, found[0])] = max(out.get((path, found[0]), 0.0), found[1])
+            loc = fn.get("loc", {})
+            out.spans.setdefault(path, []).append((int(loc["start"]["line"]), int(loc["end"]["line"]), found[1]))
+    lines = out.lines.setdefault(path, {})
+    for sid, st in entry.get("statementMap", {}).items():
+        number = st.get("start", {}).get("line")
+        if number is not None:
+            lines[number] = max(lines.get(number, 0), entry.get("s", {}).get(sid, 0))
+
 
 def from_istanbul(report, sources_root, path_map=None):
     """{(abs file, line): coverage} from an istanbul `coverage-final.json` (vitest
     --coverage, c8/v8 or istanbul providers alike): a function's coverage is the share
-    of the statements inside its range that ran; its line is its declaration's, and
-    the result also answers `within(path, line)` for a line inside a function."""
+    of the statements inside its range that ran; its line is its declaration's, and the
+    result also answers `over(path, start, end)` and `within(path, line)` for a function
+    the report never listed."""
     root = os.path.join(os.path.realpath(sources_root), "")
     out, named = Spanned(), set()
     for entry in report.values():
         path = os.path.realpath(remap(entry.get("path", ""), path_map))
         named.add(path)
-        if not path.startswith(root):
-            continue
-        for fn_id, fn in entry.get("fnMap", {}).items():
-            found = _istanbul_function(entry, fn_id, fn)
-            if found:
-                out[(path, found[0])] = max(out.get((path, found[0]), 0.0), found[1])
-                loc = fn.get("loc", {})
-                out.spans.setdefault(path, []).append((int(loc["start"]["line"]), int(loc["end"]["line"]), found[1]))
+        if path.startswith(root):
+            _istanbul_entry(entry, path, out)
     if named and not any(p.startswith(root) for p in named):
         raise none_under("istanbul", named, sources_root)
     return out

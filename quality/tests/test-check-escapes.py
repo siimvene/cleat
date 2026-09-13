@@ -111,6 +111,14 @@ try:
     check("#4: production code appended after the test module's closing brace is judged", "src/lib.rs:9  expect" in out, out)
     code, out = run(config, "--write-baseline"); code, out = run(config)
     check("and the success line says how many were skipped as tests", code == 0 and "(2 in inline Rust tests skipped)" in out, out)
+    # a raw string with braces and a stray `"` above the module, and the reader still finds its braces
+    write(rs, 'pub fn read() -> i32 { let s = "a \"quoted\" { thing"; s.len() as i32 }\n\n'
+              '#[cfg(test)]\nmod tests {\n    const SAMPLE: &str = r#"{ "predictions" : [\n{"t":"x", "v":"1"},\n]}"#;\n'
+              '    #[test]\n    fn t() { let rows = parse(SAMPLE).unwrap(); assert_eq!(rows.len(), 1); }\n}\n')
+    write(config, json.dumps({"escapes": {"roots": ["src"], "languages": ["rust"], "baseline": "rs2-baseline.json"}}))
+    code, out = run(config)
+    check("a multi-line raw string inside the test module does not end the module early", code == 0 and "(1 in inline Rust tests skipped)" in out, out)
+    write(rs, "pub fn read() -> i32 { let v: Result<i32, ()> = Ok(1); v.unwrap() }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { let x: Result<i32, ()> = Ok(1); x.unwrap(); x.expect(\"no\"); }\n}\n\npub fn after() -> i32 { let v: Result<i32, ()> = Ok(1); v.expect(\"appended below the tests\") }\n")
     write(config, json.dumps({"escapes": {"roots": ["src"], "languages": ["rust"], "skip_rust_tests": False, "baseline": "rs-baseline.json"}}))
     code, out = run(config)
     check("skip_rust_tests: false counts them", code == 1 and "src/lib.rs:6" in out, out)

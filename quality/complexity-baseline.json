@@ -20,13 +20,6 @@
    "lines": 44
   },
   {
-   "file": "quality/bin/check-crap.py",
-   "text": "def complexities_for(args, settings):",
-   "line": 198,
-   "cc": 11,
-   "lines": 23
-  },
-  {
    "file": "quality/bin/check-reachability.py",
    "text": "def judge(rules, config):",
    "line": 107,
@@ -43,21 +36,21 @@
   {
    "file": "quality/bin/report-hotspots.py",
    "text": "def lizard_spec(settings):",
-   "line": 103,
+   "line": 102,
    "cc": 10,
    "lines": 15
   },
   {
    "file": "quality/bin/extractors/coverage.py",
    "text": "def from_codecov(export, sources_root, path_map=None):",
-   "line": 284,
+   "line": 303,
    "cc": 9,
    "lines": 19
   },
   {
    "file": "quality/bin/ratchet.py",
    "text": "def _print_notes(verdict, gate, offer_remedy):",
-   "line": 257,
+   "line": 278,
    "cc": 9,
    "lines": 18
   }

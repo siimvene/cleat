@@ -28,7 +28,6 @@ import quality_config
 from extractors import patterns
 
 SECTION = "manifests"
-SKIP_DIRS = {".git", "node_modules", "build", ".build", "DerivedData", "__pycache__"}
 
 
 def unnamed(manifest_text, sources, repo_root):
@@ -38,7 +37,7 @@ def unnamed(manifest_text, sources, repo_root):
 
 def sources_of(entry, config):
     roots = config.paths(entry.get("roots", ["."]))
-    skip = SKIP_DIRS | set(entry.get("skip_dirs", []))
+    skip = set(entry.get("skip_dirs", []))
     return list(patterns.files(roots, tuple(entry.get("extensions", [".swift"])), skip))
 
 

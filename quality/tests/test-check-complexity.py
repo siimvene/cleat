@@ -90,6 +90,67 @@ try:
           str(mirrored))
     check("the mirrored file has the same line count", open(copy).read().count("\n") == open(knot).read().count("\n"))
 
+    # --- a Rust raw string must not hide the functions after it.
+    # lizard tokenises `r#"…"#` as ordinary code. In the body below the quotes and the
+    # apostrophes interleave — `["']` twice — so lizard pairs the opening quote with the
+    # one inside the first `["`, pairs the two apostrophes across the `"` between them,
+    # and is left holding the closing quote as the *start* of a string. That string runs
+    # to the next `"` anywhere in the file, swallowing `matcher`'s closing brace and
+    # every function after it. A swallowed function is never reported, so it is never
+    # baselined and no ceiling can ever fire on it — a whole file of them can go
+    # unmeasured while the suite stays green.
+    raw_lines = [
+        "pub fn before(a: i32) -> i32 { if a > 0 { 1 } else { 2 } }",             # 1
+        "",
+        "pub fn matcher(tag: &str) -> String {",                                  # 3
+        "    let pattern = format!(",
+        '        r#"(<[a-zA-Z]+\\s+[^>]*?data-id=[\"\']{}[\"\'][^>]*?)>"#,',       # 5
+        "        tag",
+        "    );",
+        "    pattern",
+        "}",
+        "",
+        "pub fn after(a: i32) -> i32 { if a > 0 { 1 } else { 2 } }",              # 11
+        "",
+        'pub fn last() -> String { "done".to_string() }',                          # 13
+        "",
+    ]
+    raw_src = os.path.join(tmp, "raw", "matcher.rs")
+    write(raw_src, "\n".join(raw_lines))
+
+    # The mask is a pure string transform, so its two load-bearing properties are asserted
+    # without lizard: a line number in the copy is a line number in the original, and no
+    # code outside a raw-string body is touched.
+    masked_lines = complexity.masked_raw_strings("\n".join(raw_lines)).split("\n")
+    check("masking keeps every line at its own length, so no reported line or column moves",
+          [len(line) for line in masked_lines] == [len(line) for line in raw_lines],
+          str([(i + 1, len(a), len(b)) for i, (a, b) in enumerate(zip(masked_lines, raw_lines)) if len(a) != len(b)]))
+    check("the code around a masked raw string is left exactly as it was",
+          [masked_lines[i] for i in (0, 2, 3, 5, 6, 7, 8, 10, 12)] == [raw_lines[i] for i in (0, 2, 3, 5, 6, 7, 8, 10, 12)],
+          str(masked_lines))
+    check("the raw string's body keeps neither its quotes nor its apostrophes",
+          '"' not in masked_lines[4][11:-4] and "'" not in masked_lines[4][11:-4], repr(masked_lines[4]))
+
+    # And the end-to-end claim, which needs the binary: the reader the gates call must
+    # report all four, at the lines they are declared on. Without the mask lizard reports
+    # two — the fixture is only a guard while it stays that hostile, so that is asserted too.
+    if shutil.which("lizard"):
+        measured, _ = complexity.functions_from_csv(complexity.run_lizard([raw_src], ["rust"], []), skip_rust_tests=False)
+        found = {f.name: f for f in measured}
+        check("every function in a file whose raw string interleaves quotes and apostrophes is measured",
+              sorted(found) == ["after", "before", "last", "matcher"], str(sorted(found)))
+        check("each one is reported at the line it is actually declared on",
+              [(name, found[name].line) for name in ("before", "matcher", "after", "last") if name in found]
+              == [("before", 1), ("matcher", 3), ("after", 11), ("last", 13)],
+              str(sorted((f.line, f.name) for f in measured)))
+        check("a masked raw string contributes no branches of its own",
+              "matcher" in found and found["matcher"].cc == 1, str([(f.name, f.cc) for f in measured]))
+        unmasked, _ = complexity.functions_from_csv(complexity._lizard([raw_src], ["rust"], []), skip_rust_tests=False)
+        check("the fixture is still hostile: unmasked, lizard loses the functions after the raw string",
+              sorted(f.name for f in unmasked) == ["before", "matcher"], str(sorted(f.name for f in unmasked)))
+    else:
+        check("lizard is not installed, so the raw-string fixture's end-to-end half is not exercised (CI installs it)", True)
+
     config = os.path.join(tmp, "quality.json")
     baseline = os.path.join(tmp, "complexity-baseline.json")
     write(config, json.dumps({"complexity": {"tool": "lizard",
@@ -293,6 +354,30 @@ try:
         check("a symlinked Rust source is judged by its repository name in the mirror pass too", "lib2.rs" in out, out)
     else:
         check("lizard is not installed, so root-relative excludes are not exercised", True)
+    # --- --only keeps to the configured sources: a changed file outside them is not judged.
+    if shutil.which("lizard"):
+        only_src = os.path.join(tmp, "apps", "svc", "src")
+        inside = os.path.join(only_src, "inside.py")
+        outside = os.path.join(tmp, "apps", "svc", "tests", "outside.py")
+        write(inside, "def inside_fn(a):\n" + branchy_body)
+        write(outside, "def outside_fn(a):\n" + branchy_body)
+        only_config = os.path.join(tmp, "only-quality.json")
+        write(only_config, json.dumps({"complexity": {
+            "sources": ["apps/svc/src"], "languages": ["python"], "exclude": [],
+            "ceilings": {"cc": 8, "lines": 60}, "baseline": "only-baseline.json"}}))
+        write(os.path.join(tmp, "only-baseline.json"), json.dumps({"provenance": {}, "entries": []}))
+        code, out = run(only_config, "--only", "apps/svc/tests/outside.py")
+        check("--only over a changed file outside every source judges nothing", code == 0 and "outside_fn" not in out, out)
+        code, out = run(only_config, "--only", "apps/svc/src/inside.py", "apps/svc/tests/outside.py")
+        check("--only over a changed file inside a source still judges it", code == 1 and "inside_fn" in out, out)
+        check("and still leaves the one outside alone", "outside_fn" not in out, out)
+        script = os.path.join(only_src, "tool.sh")
+        write(script, "tool_fn() {\n" + "\n".join("  if [ $1 = %d ]; then echo %d; fi" % (i, i) for i in range(12)) + "\n}\n")
+        code, out = run(only_config, "--only", "apps/svc/src/tool.sh")
+        check("--only over a changed file of a language the section does not read judges nothing",
+              code == 0 and "tool_fn" not in out, out)
+    else:
+        check("lizard is not installed, so --only's scoping is not exercised against a real run", True)
 
     # --- Against this checkout, when it configures the section and lizard is installed.
     repo = os.path.dirname(os.path.dirname(HERE))
