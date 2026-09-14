@@ -84,6 +84,26 @@ def judge(functions, cc_ceiling, line_ceiling, repo):
     return over
 
 
+def _within(path, root):
+    """Whether `path` is `root` itself or sits under it — by real path, so a symlinked
+    source (git reports the target) and the filesystem root both compare correctly."""
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives on Windows — not under
+        return False
+
+
+def _roots(args, config, sources):
+    """What to measure: the configured `sources`, or — under --only — the changed files
+    that fall within them (a changed file outside the sources is not this gate's to
+    judge, though --changed passes every changed file)."""
+    if args.only is None:
+        return sources
+    return [p for p in (config.path(f) for f in args.only)
+            if os.path.isfile(p) and any(_within(p, s) for s in sources)]
+
+
 def read_functions(args, name, section, config):
     """(functions, skipped, tool, version) from a saved report when a flag names one, else
     from the tool over the configured sources."""
@@ -94,11 +114,9 @@ def read_functions(args, name, section, config):
     if args.lint:
         with open(args.lint) as handle:
             return complexity.functions_from_swiftlint(json.load(handle)), 0, "swiftlint", None
-    roots = config.paths(config.get(name, "sources"))
-    if args.only is not None:
-        roots = [config.path(f) for f in args.only if os.path.isfile(config.path(f))]
-        if not roots:
-            return [], 0, complexity.tool_of(section), None
+    roots = _roots(args, config, config.paths(config.get(name, "sources")))
+    if args.only is not None and not roots:
+        return [], 0, complexity.tool_of(section), None
     return complexity.measure(section, roots, config.paths(section.get("exclude_except", [])))
 
 

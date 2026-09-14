@@ -15,6 +15,11 @@ SCRIPT = os.path.join(os.path.dirname(HERE), "bin", "check-complexity.py")
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
 from extractors import complexity
 import ratchet
+import quality_config
+import importlib.util as _ilu
+from types import SimpleNamespace
+_cc_spec = _ilu.spec_from_file_location("check_complexity", SCRIPT)
+check_complexity = _ilu.module_from_spec(_cc_spec); _cc_spec.loader.exec_module(check_complexity)
 
 failed = 0
 
@@ -104,6 +109,21 @@ try:
     check("the test-module function is not reported", "knot.rs:7" not in out, out)
     check("the simple function is not reported", "knot.rs:1" not in out, out)
     check("the baseline count is in the message", "beyond the 0 the baseline holds" in out, out)
+
+    # --changed passes every changed file via --only; a changed file OUTSIDE the configured
+    # sources (e.g. vendored quality/ tooling in a consuming project) must not be judged.
+    check("_within: a file under a source dir counts", check_complexity._within(os.path.join(src, 'a.rs'), src))
+    check("_within: a file outside the source dir does not", not check_complexity._within(os.path.join(tmp, 'quality', 'x.py'), src))
+    check("_within: a sibling sharing the name prefix is not under it", not check_complexity._within(src + '2/a.rs', src))
+    _linkdir = os.path.join(tmp, 'linked'); os.symlink(src, _linkdir)
+    check("_within: a file reached through a symlinked source dir still matches",
+          check_complexity._within(os.path.join(src, 'a.rs'), _linkdir))
+    cfg = quality_config.load(config)
+    outside = os.path.join(tmp, 'quality', 'bin', 'tool.py'); write(outside, 'def f():\n    return 1\n')
+    only_args = SimpleNamespace(csv=None, lint=None, only=[os.path.relpath(outside, tmp)])
+    funcs, skipped, _tool, _ver = check_complexity.read_functions(only_args, 'complexity', cfg.section('complexity'), cfg)
+    check("a changed file outside the configured sources is not measured (empty, no lizard run)",
+          funcs == [] and skipped == 0, str((funcs, skipped)))
 
     code, out = run(config, "--csv", csv_path, "--write-baseline")
     check("--write-baseline accepts what is over the gate", code == 0 and "4 function(s) over the gate" in out, out)
