@@ -22,6 +22,11 @@ from harness import Suite, write
 SCRIPT = os.path.join(os.path.dirname(HERE), "bin", "check-duplication.py")
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
 from extractors import patterns, changed, duplication
+import importlib.util as _ilu
+import quality_config
+_dup_spec = _ilu.spec_from_file_location("check_duplication", SCRIPT)
+check_duplication = _ilu.module_from_spec(_dup_spec)
+_dup_spec.loader.exec_module(check_duplication)
 
 suite = Suite("test-check-duplication"); check = suite.check
 
@@ -153,6 +158,56 @@ try:
     write(config, json.dumps({"duplication": {"roots": ["src"], "baseline": "b.json"}}))
     code, out = run(config)
     check("a section naming no languages or suffixes is refused", code == 2 and "nothing to read" in out, out)
+
+    # sources() honours .gitignore via git ls-files: a tracked or untracked-not-ignored
+    # copy is scanned, an ignored one is not; a non-git root falls back to the walk.
+    def scanned(repo):
+        cfg = quality_config.load(os.path.join(repo, "quality.json"))
+        return sorted(os.path.relpath(p, repo) for p in check_duplication.sources(cfg.section("duplication"), cfg))
+
+    def copy_of(prefix):
+        return "def total_%s(items):\n    total = 0\n" % prefix + BLOCK + "    return total\n"
+
+    gi = os.path.join(tmp, "gitignore-repo")
+    write(os.path.join(gi, "src", "a.py"), copy_of("a"))
+    write(os.path.join(gi, "src", "b.py"), copy_of("b"))
+    write(os.path.join(gi, "quality.json"), json.dumps({"duplication": {"roots": ["src"], "languages": ["python"], "baseline": "b.json"}}))
+    git(gi, "init", "-q", "-b", "main")
+    git(gi, "config", "user.email", "t@example.com")
+    git(gi, "config", "user.name", "T")
+    git(gi, "add", "src/a.py", "src/b.py", "quality.json")
+    git(gi, "commit", "-q", "-m", "tracked pair")
+
+    write(os.path.join(gi, ".gitignore"), "src/ignored.py\n")
+    write(os.path.join(gi, "src", "ignored.py"), copy_of("i"))
+    control = sorted(os.path.relpath(p, gi) for p in patterns.files([os.path.join(gi, "src")], (".py",), set(), []))
+    check("control: a plain walk would scan the .gitignore'd copy", "src/ignored.py" in control, str(control))
+    scan = scanned(gi)
+    check("an ignored copy is NOT scanned (honours .gitignore)", "src/ignored.py" not in scan, str(scan))
+    check("but the tracked copies are", "src/a.py" in scan and "src/b.py" in scan, str(scan))
+    clone_files = lambda paths: sorted({loc[0] for c in duplication.find(paths, gi) for loc in c.locations})
+    check("so the ignored copy is not reported as a clone",
+          "src/ignored.py" not in clone_files([os.path.join(gi, p) for p in scan]), str(scan))
+
+    write(os.path.join(gi, "src", "untracked.py"), copy_of("u"))
+    scan = scanned(gi)
+    check("an untracked-but-not-ignored copy IS scanned", "src/untracked.py" in scan, str(scan))
+    check("and the tracked copy IS reported as its clone",
+          {"src/a.py", "src/untracked.py"} <= set(clone_files([os.path.join(gi, p) for p in scan])), str(scan))
+
+    # git ls-files lists index paths for files deleted from the worktree (and submodule
+    # gitlinks); select() must skip them, not open them (would crash significant_in()).
+    os.remove(os.path.join(gi, "src", "a.py"))
+    scan = scanned(gi)
+    check("a tracked file deleted from the worktree is skipped, not opened", "src/a.py" not in scan, str(scan))
+    check("and the rest still scans without crashing", "src/b.py" in scan, str(scan))
+
+    ng = os.path.join(tmp, "nogit")
+    write(os.path.join(ng, "src", "a.py"), copy_of("a"))
+    write(os.path.join(ng, "src", "b.py"), copy_of("b"))
+    write(os.path.join(ng, "quality.json"), json.dumps({"duplication": {"roots": ["src"], "languages": ["python"], "baseline": "b.json"}}))
+    check("outside a git repo sources() falls back to the directory walk",
+          check_duplication.tracked_or_unignored(os.path.join(ng, "src")) is None and scanned(ng) == ["src/a.py", "src/b.py"], str(scanned(ng)))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

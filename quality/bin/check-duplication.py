@@ -41,6 +41,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True
@@ -69,6 +70,38 @@ IMPORTS_BY_SUFFIX = {
 }
 
 
+def tracked_or_unignored(root):
+    """Absolute paths of files under `root` that git tracks or does not ignore
+    (`git ls-files --cached --others --exclude-standard`), or None when `root` is
+    not inside a git work tree, or git is unavailable — the caller then falls back to
+    the directory walk."""
+    if not os.path.isdir(root):
+        return None
+    try:
+        proc = subprocess.run(["git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
+                              capture_output=True, text=True)
+    except OSError:
+        return None  # git not on PATH or the exec failed — fall back to the walk
+    if proc.returncode != 0:
+        return None
+    return [os.path.join(root, name) for name in proc.stdout.split("\0") if name]
+
+
+def select(paths, root, suffixes, skip, exclude):
+    """The `patterns.files` filter — suffix, skipped directory names, exclude globs —
+    over an explicit list rather than a walk, so a git listing is judged the same."""
+    for path in sorted(paths):
+        if not path.endswith(suffixes):
+            continue
+        if not os.path.isfile(path):
+            continue  # ls-files lists index paths for deleted files and submodule gitlinks
+        if skip & set(os.path.relpath(path, root).split(os.sep)[:-1]):
+            continue
+        if patterns.excluded(path, exclude):
+            continue
+        yield path
+
+
 def sources(section, config):
     roots = config.paths(section.get("roots", ["."]))
     skip = set(check_escapes.DEFAULT_SKIP_DIRS) | set(section.get("skip_dirs", []))
@@ -76,7 +109,16 @@ def sources(section, config):
         {s for name in section.get("languages", []) for s in check_escapes.language(name)["suffixes"]})
     if not suffixes:
         raise KeyError("%s: \"%s\" names no \"languages\" and no \"suffixes\" — nothing to read" % (config.file, SECTION))
-    return list(patterns.files(roots, suffixes, skip, section.get("exclude", [])))
+    suffixes = tuple(suffixes)
+    exclude = section.get("exclude", [])
+    result = []
+    for root in roots:
+        listed = tracked_or_unignored(root)
+        if listed is None:
+            result.extend(patterns.files([root], suffixes, skip, exclude))
+        else:
+            result.extend(select(listed, root, suffixes, skip, exclude))
+    return result
 
 
 def clones_for(section, config, paths):
