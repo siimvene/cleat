@@ -5,8 +5,8 @@ a list of (repo-relative path, first line, last line), one per copy, and
 `Clone.lines` how long each copy is.
 
 `find()` is the built-in finder, for a project with nothing installed: every
-file's significant lines (whitespace collapsed; blank lines, lone braces and
-punctuation-only lines dropped) are hashed in windows of `min_lines`, and a
+file's significant lines (whitespace collapsed; blank lines, lone braces,
+punctuation-only lines and import declarations dropped) are hashed in windows of `min_lines`, and a
 window seen twice is the start of a clone that is extended as long as both
 sides keep matching. It is exact-match after normalisation — renamed
 variables are not caught, which a token-based scanner does; for that, read
@@ -40,24 +40,34 @@ class Clone:
         return False
 
 
-def significant(text, skip_ranges=()):
+def significant(text, skip_ranges=(), import_prefixes=()):
     """[(line number, normalised text)] for the lines worth comparing — those inside
-    `skip_ranges` (inline test modules) left out."""
+    `skip_ranges` (inline test modules) left out, and, when `import_prefixes` is given,
+    lines whose collapsed text leads with an import keyword. The prefixes are scoped to
+    the file's language by the caller, so `package`/`use` drop as a Kotlin/Rust import
+    but stay as Swift's access modifier and Ruby's middleware call."""
     out = []
     for number, raw in enumerate(text.split("\n"), 1):
         if patterns.in_ranges(skip_ranges, number):
             continue
         line = " ".join(raw.split())
+        if import_prefixes and line.startswith(import_prefixes):
+            continue
         if len(line) < 3 or set(line) <= PUNCTUATION_ONLY:
             continue
         out.append((number, line))
     return out
 
 
-def significant_in(path, skip_rust_tests=True):
-    """The significant lines of a file, an inline Rust test module dropped when asked."""
+def significant_in(path, skip_rust_tests=True, imports=None):
+    """The significant lines of a file, an inline Rust test module dropped when asked and —
+    when `imports` maps the file's suffix to its language's import prefixes — the import
+    declarations dropped."""
+    prefixes = imports.get(os.path.splitext(path)[1], ()) if imports else ()
     with open(path, errors="replace") as handle:
-        return significant(handle.read(), patterns.rust_test_ranges(path) if skip_rust_tests else ())
+        return significant(handle.read(),
+                           patterns.rust_test_ranges(path) if skip_rust_tests else (),
+                           prefixes)
 
 
 def _windows(lines, min_lines):
@@ -81,12 +91,12 @@ def _continues(a, b, i, j):
     return i > 0 and j > 0 and a[i - 1] == b[j - 1]
 
 
-def find(paths, repo_root, min_lines=6, skip_rust_tests=True):
+def find(paths, repo_root, min_lines=6, skip_rust_tests=True, imports=None):
     """Every clone across `paths` — pairs of copies at least `min_lines` significant
     lines long. A pair is reported at the start of the longest run, once."""
     files = []
     for path in paths:
-        lines = significant_in(path, skip_rust_tests)
+        lines = significant_in(path, skip_rust_tests, imports)
         files.append((os.path.relpath(path, repo_root), lines, _windows(lines, min_lines)))
     starts = {}
     for f, (_, _, hashes) in enumerate(files):
@@ -132,7 +142,7 @@ def from_jscpd(report, repo_root):
     return clones
 
 
-def density(clones, paths, repo_root, skip_rust_tests=True):
+def density(clones, paths, repo_root, skip_rust_tests=True, imports=None):
     """(duplicated significant lines, total significant lines) across `paths`."""
     inside = {}
     for clone in clones:
@@ -140,7 +150,7 @@ def density(clones, paths, repo_root, skip_rust_tests=True):
             inside.setdefault(rel, set()).update(range(start, end + 1))
     total = duplicated = 0
     for path in paths:
-        numbers = {n for n, _ in significant_in(path, skip_rust_tests)}
+        numbers = {n for n, _ in significant_in(path, skip_rust_tests, imports)}
         rel = os.path.relpath(path, repo_root)
         total += len(numbers)
         duplicated += len(numbers & inside.get(rel, set()))

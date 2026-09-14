@@ -56,6 +56,30 @@ try:
     check("with its length in significant lines", clones[0].lines == 10, str(clones[0].lines))
     check("and the line range of each copy", clones[0].locations[0][1:] == (2, 11), str(clones[0].locations))
     check("a block shorter than min_lines is not a clone", duplication.find([a, b, c], repo, min_lines=12) == [])
+
+    # Import declarations are language-scoped: significant() drops only the prefixes it is
+    # given, so `package`/`use` fall as a Kotlin/Rust import but stay as Swift's access
+    # modifier and Ruby's middleware call. significant_in keys the prefixes by suffix.
+    txt = "import os\nfrom a import b\n    real = compute(value)\n"
+    check("no prefixes given: nothing is dropped as an import",
+          [t for _, t in duplication.significant(txt)] == ["import os", "from a import b", "real = compute(value)"],
+          str(duplication.significant(txt)))
+    check("python's prefixes drop the import/from lines and keep the code",
+          [t for _, t in duplication.significant(txt, import_prefixes=("import ", "from "))] == ["real = compute(value)"],
+          str(duplication.significant(txt, import_prefixes=("import ", "from "))))
+    check("a real line merely starting with an import word is kept (prefix ends in a space)",
+          [t for _, t in duplication.significant("importance = weigh(x)\n", import_prefixes=("import ",))] == ["importance = weigh(x)"],
+          str(duplication.significant("importance = weigh(x)\n", import_prefixes=("import ",))))
+    imap = {".kt": ("import ", "package "), ".swift": ("import ",)}
+    ktf = os.path.join(tmp, "imp", "A.kt"); swf = os.path.join(tmp, "imp", "B.swift")
+    write(ktf, "package com.x\nimport a.B\nimport a.C\nval real = compute(v)\n")
+    write(swf, "package var token = compute()\nlet real = compute(v)\n")
+    check("significant_in drops kotlin package/import via the suffix map",
+          [t for _, t in duplication.significant_in(ktf, imports=imap)] == ["val real = compute(v)"],
+          str(duplication.significant_in(ktf, imports=imap)))
+    check("but a swift `package var` access modifier is kept (its suffix maps to import-only)",
+          "package var token = compute()" in [t for _, t in duplication.significant_in(swf, imports=imap)],
+          str(duplication.significant_in(swf, imports=imap)))
     check("an exclude glob drops a file from the walk by name or by path",
           patterns.excluded("/x/src/a.test.py", ["*.test.py"]) and patterns.excluded("/x/fixtures/a.py", ["*/fixtures/*"])
           and not patterns.excluded("/x/src/a.py", ["*.test.py", "*/fixtures/*"]))

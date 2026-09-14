@@ -53,6 +53,7 @@ SECTION = "escapes"
 LANGUAGES = {
     "python": {
         "suffixes": [".py"],
+        "imports": ("import ", "from "),
         "patterns": {
             "type ignore": r"#\s*type:\s*ignore",
             "noqa": r"#\s*noqa\b",
@@ -63,6 +64,7 @@ LANGUAGES = {
     },
     "typescript": {
         "suffixes": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+        "imports": ("import ",),
         "patterns": {
             "any": r":\s*any\b|\bas\s+any\b|<any>",
             "ts-ignore": r"@ts-(?:ignore|expect-error|nocheck)",
@@ -74,6 +76,7 @@ LANGUAGES = {
     "javascript": {"alias": "typescript"},
     "swift": {
         "suffixes": [".swift"],
+        "imports": ("import ",),
         "patterns": {
             "force try": r"\btry!",
             "force cast": r"\bas!",
@@ -85,6 +88,7 @@ LANGUAGES = {
     },
     "rust": {
         "suffixes": [".rs"],
+        "imports": ("use ",),
         "patterns": {
             "unwrap": r"\.unwrap\(\)",
             "expect": r"\.expect\(",
@@ -96,6 +100,7 @@ LANGUAGES = {
     },
     "kotlin": {
         "suffixes": [".kt", ".kts"],
+        "imports": ("import ", "package "),
         "patterns": {
             "not-null assertion": r"!!",
             "suppress": r"@Suppress\(",
@@ -104,6 +109,7 @@ LANGUAGES = {
     },
     "java": {
         "suffixes": [".java"],
+        "imports": ("import ", "package "),
         "patterns": {
             "suppress warnings": r"@SuppressWarnings\(",
             "skipped test": r"@(?:Ignore|Disabled)\b",
@@ -111,6 +117,7 @@ LANGUAGES = {
     },
     "go": {
         "suffixes": [".go"],
+        "imports": ("import ", "package "),
         "patterns": {
             "nolint": r"//\s*nolint",
             "skipped test": r"\bt\.Skip(?:Now|f)?\(",
@@ -118,6 +125,7 @@ LANGUAGES = {
     },
     "ruby": {
         "suffixes": [".rb"],
+        "imports": ("require ", "require_relative ", "load "),
         "patterns": {
             "rubocop:disable": r"rubocop:disable",
             "skipped test": r"\bskip\b|\bxit\b|\bpending\b",
@@ -125,6 +133,7 @@ LANGUAGES = {
     },
     "shell": {
         "suffixes": [".sh", ".bash", ".zsh"],
+        "imports": (),
         "patterns": {
             "errors ignored": r"\|\|\s*true\b|^\s*set\s+\+e\b",
             "shellcheck disable": r"shellcheck\s+disable",
@@ -137,7 +146,7 @@ DEFAULT_SKIP_DIRS = [".git", "node_modules", "vendor", "build", ".build", "dist"
 
 
 def language(name):
-    """A language's suffixes and patterns, following an alias."""
+    """A language's suffixes, patterns and import-declaration prefixes, following an alias."""
     spec = LANGUAGES.get(name)
     if spec is None:
         raise KeyError("no built-in escape patterns for \"%s\" — one of: %s" % (name, ", ".join(sorted(LANGUAGES))))

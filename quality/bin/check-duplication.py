@@ -58,6 +58,17 @@ SECTION = "duplication"
 DENSITY_KEY = "duplicated share of significant lines"
 
 
+# Import declarations to drop, per file suffix, from every language's own set —
+# `package` is an import in Kotlin but an access modifier in Swift, `use` an import in
+# Rust but a middleware call in Ruby. Keyed by suffix (not the configured languages) so
+# a config selecting files by raw "suffixes" still gets its imports dropped.
+IMPORTS_BY_SUFFIX = {
+    suffix: tuple(spec.get("imports", ()))
+    for name, spec in check_escapes.LANGUAGES.items() if "alias" not in spec
+    for suffix in spec["suffixes"]
+}
+
+
 def sources(section, config):
     roots = config.paths(section.get("roots", ["."]))
     skip = set(check_escapes.DEFAULT_SKIP_DIRS) | set(section.get("skip_dirs", []))
@@ -73,7 +84,7 @@ def clones_for(section, config, paths):
     if "jscpd" in report:
         with open(config.path(report["jscpd"])) as handle:
             return duplication.from_jscpd(json.load(handle), config.root), "jscpd"
-    return duplication.find(paths, config.root, int(section.get("min_lines", 6)), section.get("skip_rust_tests", True)), "built-in"
+    return duplication.find(paths, config.root, int(section.get("min_lines", 6)), section.get("skip_rust_tests", True), IMPORTS_BY_SUFFIX), "built-in"
 
 
 def describe(clone):
@@ -95,7 +106,7 @@ def measure(section, config):
     """(finding, clones, provenance): the density as one Finding, and what was read."""
     paths = sources(section, config)
     clones, tool = clones_for(section, config, paths)
-    duplicated, total = duplication.density(clones, paths, config.root, section.get("skip_rust_tests", True))
+    duplicated, total = duplication.density(clones, paths, config.root, section.get("skip_rust_tests", True), IMPORTS_BY_SUFFIX)
     share = round(100.0 * duplicated / total, 2) if total else 0.0
     finding = ratchet.Finding(".", 0, DENSITY_KEY, {"percent": share, "duplicated_lines": duplicated, "total_lines": total})
     measured = ratchet.provenance(tool, None, {k: section[k] for k in sorted(section) if k != "baseline"})
