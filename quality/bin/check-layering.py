@@ -35,7 +35,9 @@ layer is undeclared. Under "deny" that holds for an `always_allowed` layer too
 relays (core -> testing/shim -> api); list it in `allowed` (null for
 unrestricted) to say what it may reach. A file's layer is where it really is:
 a symlink in one layer to a file in another is the other layer, and a symlink
-resolving outside every judged root is a violation naming the link.
+— source or target — resolving outside every judged root is a violation naming
+the link; its exemption `target` is where the link really points, relative to
+the root, so retargeting the link retires the entry.
 
 How a reference is read (`extractors/references.py`) depends on
 `layering.references`: `identifiers` — the default, for Swift — reads every
@@ -202,15 +204,34 @@ def place(path, roots):
     return None
 
 
-def classify(rules, roots, path, source, target, target_root):
+def outside_root(path, root):
+    """Where `path` really is, relative to `root`'s real path — for a symlink resolving
+    outside every judged root, so an exemption keys on where it points, not the link."""
+    return os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+
+
+def escapes(roots, path, app, target, target_root):
+    """(referenced, note) when the reference's target or its source is a symlink resolving
+    outside every judged root — always a violation — else None."""
+    if place(target, roots) is None:
+        return (outside_root(target, target_root), "through the symlink %s, which resolves outside every judged root"
+                % os.path.relpath(target, target_root))
+    if place(path, roots) is None:
+        return (place(target, roots), "the source is a symlink resolving to %s, outside every judged root"
+                % outside_root(path, app))
+    return None
+
+
+def classify(rules, roots, path, app, target, target_root):
     """(referenced, note) for one reference: `referenced` None when the layering permits
     it. Layers come from where a file really is, so a symlink in one layer to a file in
-    another relays nothing; a symlink resolving outside every judged root is a violation."""
-    as_written = os.path.relpath(target, target_root)
-    real = place(target, roots)
-    if real is None:
-        return as_written, "a symlink resolving to %s, outside every judged root" % os.path.realpath(target)
-    from_layer = layer_of(place(path, roots) or source)
+    another relays nothing; a source or target symlink resolving outside every judged
+    root is a violation."""
+    escaped = escapes(roots, path, app, target, target_root)
+    if escaped:
+        return escaped
+    as_written, real = os.path.relpath(target, target_root), place(target, roots)
+    from_layer = layer_of(place(path, roots))
     if rules.permits(from_layer, layer_of(real)):
         return None, ""
     notes = ["through the symlink %s" % as_written] if real != as_written else []
@@ -234,7 +255,7 @@ def judge(app, exempt, rules, strict_dead, references_in_app, roots=None):
     exempt_used = set()
     for path, number, name, target, target_root in references:
         source = os.path.relpath(path, app)
-        referenced, note = classify(rules, roots, path, source, target, target_root)
+        referenced, note = classify(rules, roots, path, app, target, target_root)
         if referenced is None:
             continue
         key = exempt_key(exempt, source, name, referenced)

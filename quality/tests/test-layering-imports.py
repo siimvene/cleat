@@ -299,8 +299,58 @@ try:
     check("symlink: a file link into another layer is that layer",
           "core/evil.py:2 -> authalias (api/auth.py) — through the symlink core/authalias.py" in out, out)
     check("symlink: a link resolving outside every judged root is a violation naming the link",
-          "core/evil.py:3 -> far (core/farlink/far.py) — a symlink resolving to" in out and "outside every judged root" in out, out)
+          "core/evil.py:3 -> far (../outside/far.py) — through the symlink core/farlink/far.py, which resolves outside every judged root" in out, out)
     check("symlink: a source that is a link is judged in the layer it points into", "core/helper_alias.py" not in out, out)
+
+    # ---- third pass: alias bindings are per scope, aliases come from every assignment
+    # form, and an out-of-root symlink is judged by where it really points.
+    kv = os.path.join(tmp, "kv10", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    shadowed = {
+        "param": "import importlib\ndef f(importlib):\n    importlib.import_module('kvart.api.auth')\n",
+        "local": "import importlib\ndef f():\n    importlib = registry\n    importlib.import_module('kvart.api.auth')\n",
+        "deleted": "from importlib import import_module as load\ndef f():\n    del load\n    load('kvart.api.auth')\n",
+        "lambda_": "import importlib\nf = lambda importlib: importlib.import_module('kvart.api.auth')\n",
+        "builtin": "def f(__import__):\n    __import__('kvart.api.auth')\n",
+        "comp_target": "import importlib\nx = [importlib.import_module('kvart.api.auth') for importlib in registries]\n",
+    }
+    seen = {
+        "nested": ("import importlib\ndef f():\n    importlib.import_module('kvart.api.auth')\n", 3),
+        "class_body": ("import importlib\nclass C:\n    importlib = registry\n    def m(self):\n        importlib.import_module('kvart.api.auth')\n", 5),
+        "annotated": ("from typing import Callable\nimport importlib\nload: Callable = importlib.import_module\nload('kvart.api.auth')\n", 4),
+        "chained": ("import importlib\na = b = importlib.import_module\nb('kvart.api.auth')\n", 3),
+        "comprehension": ("import importlib\nx = [importlib.import_module('kvart.api.auth') for _ in range(1)]\n", 2),
+    }
+    for stem, text in shadowed.items():
+        write(os.path.join(kv, "core", stem + ".py"), text)
+    for stem, (text, _line) in seen.items():
+        write(os.path.join(kv, "core", stem + ".py"), text)
+    code, out = run(kv_config(kv))
+    for stem in shadowed:
+        check("scope: a name shadowed in its scope (%s) is not the import machinery" % stem, "core/%s.py" % stem not in out, out)
+    for stem, (_text, line) in seen.items():
+        check("scope: %s is read" % stem, code == 1 and "core/%s.py:%d -> auth (api/auth.py)" % (stem, line) in out, out)
+
+    kv = os.path.join(tmp, "kv11", "kvart")
+    write(os.path.join(kv, "core", "base.py"), "x = 1\n")
+    write(os.path.join(tmp, "kv11", "outside", "src.py"), "from kvart.core.base import x\n")
+    write(os.path.join(tmp, "kv11", "outside", "far.py"), "x = 1\n")
+    write(os.path.join(tmp, "kv11", "outside2", "far.py"), "x = 1\n")
+    os.symlink(os.path.join("..", "..", "outside", "src.py"), os.path.join(kv, "core", "src_link.py"))
+    code, out = run(kv_config(kv))
+    check("symlink: a source linked out of every judged root is a violation naming the link",
+          code == 1 and "core/src_link.py:1 -> base (core/base.py) — the source is a symlink resolving to ../outside/src.py" in out, out)
+    os.remove(os.path.join(kv, "core", "src_link.py"))
+    os.symlink(os.path.join("..", "..", "outside"), os.path.join(kv, "core", "farlink"))
+    write(os.path.join(kv, "core", "evil.py"), "from kvart.core.farlink.far import z\n")
+    pinned = {"file": "core/evil.py", "name": "far", "target": "../outside/far.py", "reason": "vendored"}
+    code, out = run(kv_config(kv, exempt=[pinned]))
+    check("symlink: an exemption for an out-of-root link names where it really points", code == 0 and "(1 exempt)" in out, out)
+    os.remove(os.path.join(kv, "core", "farlink"))
+    os.symlink(os.path.join("..", "..", "outside2"), os.path.join(kv, "core", "farlink"))
+    code, out = run(kv_config(kv, exempt=[pinned]))
+    check("symlink: retargeting the link reports the new target and retires the entry",
+          code == 1 and "core/evil.py:1 -> far (../outside2/far.py)" in out and "('core/evil.py', 'far', '../outside/far.py')" in out, out)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

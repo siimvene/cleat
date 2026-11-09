@@ -14,7 +14,10 @@ decodes into a real import line is read as that import. Read are:
   module name is a constant string or a concatenation of constant strings. Only
   the real function counts: `<name bound to importlib>.import_module(...)`, a
   bare name the file imported from importlib/runpy, the builtin `__import__` —
-  a method of any other object that shares the name is not an import;
+  a method of any other object that shares the name is not an import. Bindings
+  are per scope (module, function, lambda, class, comprehension), aliases come
+  from plain, chained and annotated assignments, and a parameter, `del` or other
+  binding of the name in a scope shadows it there;
 - `exec` / `eval` of a constant string, by parsing that string.
 
 Out of scope, by design: a module name computed at run time (an f-string with a
@@ -63,8 +66,9 @@ def parse(source, depth=0):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             tree = ast.parse(source)
-        bindings = _bindings(tree)
-        found = [item for node in ast.walk(tree) for item in _node_imports(node, bindings, depth)]
+        calls = collect(tree)
+        found = [item for node in ast.walk(tree) for item in _static_imports(node)]
+        found += [item for call, scope in calls for item in _call_imports(call, scope, depth)]
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
     return sorted(found, key=lambda item: item[0])
@@ -89,76 +93,211 @@ def _from_import(node):
     return [(node.lineno, ([] if alias.name == "*" else [base + joiner + alias.name]) + [base]) for alias in node.names]
 
 
-def _node_imports(node, bindings, depth):
-    """[(line, candidate specs)] one parsed node contributes."""
+def _static_imports(node):
+    """[(line, candidate specs)] one import statement contributes."""
     if isinstance(node, ast.Import):
         return [(node.lineno, [alias.name]) for alias in node.names]
     if isinstance(node, ast.ImportFrom):
         return _from_import(node)
-    if isinstance(node, ast.Call):
-        return _call_imports(node, bindings, depth)
     return []
 
 
 # ---------------------------------------------------------------- dynamic imports
 
-class Bindings:
-    """What a file binds the dynamic-import machinery to: `modules` maps a local name to
-    the module it is (`import importlib as il` -> il: importlib), `functions` a local
-    name to the dynamic kind it calls (`from importlib import import_module as im`)."""
-
-    def __init__(self):
-        self.modules, self.functions = {}, {}
+SHADOW = ("shadow", None)
+MAX_ALIAS_DEPTH = 20
 
 
-    def bind_import(self, node):
-        """`import importlib` / `import importlib.util` bind importlib; `import x.y as z` binds x.y."""
-        for alias in node.names:
-            head = alias.name.split(".")[0]
-            if head in ALIASABLE:
-                self.modules[alias.asname or head] = alias.name if alias.asname else head
+class Scope:
+    """One Python scope (module, function, lambda, class, comprehension) and what each
+    name is bound to in it: ("module", name), ("function", dynamic kind), ("assign",
+    value expression) or SHADOW — a parameter, a `del`, any other binding. Reading is
+    flow-insensitive: a name with any binding that is not the dynamic machinery is
+    shadowed in its whole scope, as Python makes it local to the whole scope."""
 
-    def bind_from(self, node):
-        """`from importlib import import_module [as im]` binds the function."""
-        if node.module in ALIASABLE and not node.level:
-            self.functions.update((a.asname or a.name, DYNAMIC[a.name]) for a in node.names if a.name in ALIASABLE[node.module])
+    def __init__(self, parent=None, is_class=False):
+        self.parent, self.is_class = parent, is_class
+        self.entries, self.outer = {}, set()
 
-    def bind_assign(self, node):
-        """`load = importlib.import_module` binds `load` to what it names."""
-        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            kind = callee_kind(node.value, self)
-            if kind:
-                self.functions[node.targets[0].id] = kind
+    def bind(self, name, entry):
+        self.entries.setdefault(name, []).append(entry)
 
-
-def _bindings(tree):
-    bindings = Bindings()
-    statements = {ast.Import: bindings.bind_import, ast.ImportFrom: bindings.bind_from}
-    for node in ast.walk(tree):
-        statements.get(type(node), lambda _node: None)(node)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            bindings.bind_assign(node)
-    return bindings
+    def owner_of(self, name):
+        """The scope whose binding a reference to `name` here sees, else None. A class
+        body's names are not visible in the functions nested in it."""
+        scope, here = self, True
+        while scope is not None:
+            if (here or not scope.is_class) and name in scope.entries and name not in scope.outer:
+                return scope
+            scope, here = scope.parent, False
+        return None
 
 
-def _member(module_node, attr, bindings):
-    """The dynamic kind of `attr` on `module_node` when that is a name bound to the
-    module defining it (importlib.import_module, builtins.__import__), else None."""
-    module = bindings.modules.get(module_node.id) if isinstance(module_node, ast.Name) else None
-    return DYNAMIC[attr] if module in ALIASABLE and attr in ALIASABLE[module] else None
+def _children(node, scope, calls):
+    return [(child, scope) for child in ast.iter_child_nodes(node)]
 
 
-def callee_kind(func, bindings):
-    """The dynamic kind `func` names — a name the file bound to one, a builtin, a
-    bound module's member, or `getattr(<bound module>, "<member>")` — else None."""
-    if isinstance(func, ast.Name):
-        return bindings.functions.get(func.id) or BUILTINS.get(func.id)
-    if isinstance(func, ast.Attribute):
-        return _member(func.value, func.attr, bindings)
-    if isinstance(func, ast.Call) and isinstance(func.func, ast.Name) and func.func.id == "getattr" and len(func.args) >= 2:
-        return _member(func.args[0], const_str(func.args[1]), bindings)
+def _visit_call(node, scope, calls):
+    calls.append((node, scope))
+    return _children(node, scope, calls)
+
+
+def _visit_name(node, scope, calls):
+    if not isinstance(node.ctx, ast.Load):
+        scope.bind(node.id, SHADOW)
+    return []
+
+
+def _visit_import(node, scope, calls):
+    for alias in node.names:
+        head = alias.name.split(".")[0]
+        module = alias.name if alias.asname else head
+        scope.bind(alias.asname or head, ("module", module) if module in ALIASABLE else SHADOW)
+    return []
+
+
+def _visit_import_from(node, scope, calls):
+    dynamic = () if node.level else ALIASABLE.get(node.module, ())
+    for alias in node.names:
+        if alias.name != "*":
+            scope.bind(alias.asname or alias.name, ("function", DYNAMIC[alias.name]) if alias.name in dynamic else SHADOW)
+    return []
+
+
+def _assign_target(target, value, scope):
+    """Bind a plain-name target to its value expression; any other target is visited."""
+    if isinstance(target, ast.Name):
+        scope.bind(target.id, ("assign", value))
+        return []
+    return [(target, scope)]
+
+
+def _visit_assign(node, scope, calls):
+    """`a = b = importlib.import_module`: every plain-name target is an alias candidate."""
+    pending = [(node.value, scope)]
+    for target in node.targets:
+        pending += _assign_target(target, node.value, scope)
+    return pending
+
+
+def _visit_ann_assign(node, scope, calls):
+    """`load: Callable = importlib.import_module` binds like an assignment; without a value
+    the name is still local to the scope."""
+    pending = [(node.annotation, scope)] + ([(node.value, scope)] if node.value is not None else [])
+    if node.value is None:
+        return pending + [(node.target, scope)]
+    return pending + _assign_target(node.target, node.value, scope)
+
+
+def _visit_outer(node, scope, calls):
+    scope.outer.update(node.names)
+    return []
+
+
+def _visit_bound_name(node, scope, calls):
+    """An except handler's or a match pattern's captured name shadows."""
+    for name in (getattr(node, "name", None), getattr(node, "rest", None)):
+        if name:
+            scope.bind(name, SHADOW)
+    return _children(node, scope, calls)
+
+
+def _parameters(args):
+    every = args.posonlyargs + args.args + args.kwonlyargs + [a for a in (args.vararg, args.kwarg) if a]
+    return [a.arg for a in every], [a.annotation for a in every if a.annotation]
+
+
+def _outer_parts(node, annotations):
+    """What a def or lambda evaluates in its enclosing scope: decorators, defaults, annotations."""
+    returns = [node.returns] if getattr(node, "returns", None) else []
+    defaults = node.args.defaults + [d for d in node.args.kw_defaults if d]
+    return getattr(node, "decorator_list", []) + defaults + annotations + returns
+
+
+def _visit_function(node, scope, calls):
+    """Decorators, defaults and annotations run in the enclosing scope; parameters and
+    the body are the function's own."""
+    if not isinstance(node, ast.Lambda):
+        scope.bind(node.name, SHADOW)
+    names, annotations = _parameters(node.args)
+    outer = _outer_parts(node, annotations)
+    inner = Scope(scope)
+    for name in names:
+        inner.bind(name, SHADOW)
+    body = node.body if isinstance(node.body, list) else [node.body]
+    return [(n, scope) for n in outer] + [(n, inner) for n in body]
+
+
+def _visit_class(node, scope, calls):
+    scope.bind(node.name, SHADOW)
+    inner = Scope(scope, is_class=True)
+    outer = node.decorator_list + node.bases + [k.value for k in node.keywords]
+    return [(n, scope) for n in outer] + [(n, inner) for n in node.body]
+
+
+def _visit_comprehension(node, scope, calls):
+    return _children(node, Scope(scope), calls)
+
+
+VISITORS = {
+    ast.Call: _visit_call, ast.Name: _visit_name, ast.Import: _visit_import, ast.ImportFrom: _visit_import_from,
+    ast.Assign: _visit_assign, ast.AnnAssign: _visit_ann_assign, ast.Global: _visit_outer, ast.Nonlocal: _visit_outer,
+    ast.ExceptHandler: _visit_bound_name, ast.MatchAs: _visit_bound_name, ast.MatchStar: _visit_bound_name,
+    ast.MatchMapping: _visit_bound_name, ast.FunctionDef: _visit_function, ast.AsyncFunctionDef: _visit_function,
+    ast.Lambda: _visit_function, ast.ClassDef: _visit_class, ast.ListComp: _visit_comprehension,
+    ast.SetComp: _visit_comprehension, ast.DictComp: _visit_comprehension, ast.GeneratorExp: _visit_comprehension,
+}
+
+
+def collect(tree):
+    """[(call, scope)] for every call in `tree`, with every scope's bindings recorded —
+    iteratively, so a deeply nested expression cannot exhaust the recursion limit."""
+    calls, stack = [], [(tree, Scope())]
+    while stack:
+        node, scope = stack.pop()
+        stack.extend(VISITORS.get(type(node), _children)(node, scope, calls))
+    return calls
+
+
+def resolve(name, scope, depth=0):
+    """What `name` read in `scope` is — ("module", m), ("function", kind) — else None.
+    Every binding the owning scope makes must agree, or the name is shadowed there."""
+    owner = scope.owner_of(name)
+    if owner is None:
+        return ("function", BUILTINS[name]) if name in BUILTINS else None
+    values = {_entry_value(entry, owner, depth) for entry in owner.entries[name]}
+    return values.pop() if len(values) == 1 else None
+
+
+def _entry_value(entry, scope, depth):
+    if entry[0] != "assign":
+        return None if entry is SHADOW else entry
+    return callee_value(entry[1], scope, depth + 1) if depth < MAX_ALIAS_DEPTH else None
+
+
+def _member(module_value, attr):
+    """The function `attr` of a module value names, when it is dynamic machinery."""
+    if module_value is None or module_value[0] != "module" or attr not in ALIASABLE.get(module_value[1], ()):
+        return None
+    return ("function", DYNAMIC[attr])
+
+
+def callee_value(node, scope, depth=0):
+    """What the expression `node` evaluates to, in the terms `resolve` uses: a name, a
+    member of a bound module, or `getattr(<bound module>, "<member>")`."""
+    if isinstance(node, ast.Name):
+        return resolve(node.id, scope, depth)
+    if isinstance(node, ast.Attribute):
+        return _member(callee_value(node.value, scope, depth), node.attr)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2:
+        return _member(callee_value(node.args[0], scope, depth), const_str(node.args[1]))
     return None
+
+
+def callee_kind(func, scope):
+    """The dynamic kind a call of `func` in `scope` is, else None."""
+    value = callee_value(func, scope)
+    return value[1] if value is not None and value[0] == "function" else None
 
 
 def _joined(parts):
@@ -185,8 +324,8 @@ def _arg(call, index, keywords):
     return next((k.value for k in call.keywords if k.arg in keywords), None)
 
 
-def _call_imports(call, bindings, depth):
-    kind = callee_kind(call.func, bindings)
+def _call_imports(call, scope, depth):
+    kind = callee_kind(call.func, scope)
     name = const_str(_arg(call, 0, NAME_KEYWORDS)) if kind else None
     if not name:
         return []
