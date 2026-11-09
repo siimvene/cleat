@@ -6,7 +6,10 @@ declares it, and a capitalised identifier in another file's code (comments and
 strings stripped by regex) is a reference to that file. `imports` is for
 languages with explicit imports — Python, TypeScript/JavaScript, Rust, Go,
 Kotlin, Java: each import line is resolved to a file under one of the judged
-roots. `ast-grep` is the identifiers reading done by a parser, for any of
+roots — for Python each import the parser finds (`python_imports.py`: comma
+lists, semicolons, continuations, encoding cookies, dynamic imports of a
+constant name); a Python file that does not parse is read statement by
+statement instead and reported as unparsed. `ast-grep` is the identifiers reading done by a parser, for any of
 nine languages: declarations are the grammar's declaration nodes, references
 its identifier tokens, so a name in a comment or a string is never a
 reference and no per-language regex is needed. All three yield the same
@@ -21,7 +24,7 @@ import shutil
 import subprocess
 import tempfile
 
-from . import patterns
+from . import patterns, python_imports
 
 # ---------------------------------------------------------------- identifiers
 
@@ -209,30 +212,58 @@ def _name_of(spec):
     return re.split(r"[.:]+", spec.strip(".:"))[-1] or spec
 
 
-def _imports_in(path, language, roots, app):
-    """(line, name, target, root) for each import in one file that resolves under a root."""
-    with open(path, errors="replace") as handle:
-        text = handle.read()
+def _regex_imports(text, language):
+    """[(line, [spec])] for each match of the language's import regexes."""
+    return [(text.count("\n", 0, match.start()) + 1, [match.group(1)])
+            for regex in IMPORT_RES[language] for match in regex.finditer(text)]
+
+
+def _resolve_first(candidates, language, path, app):
+    """(spec, file) for the first candidate spec that resolves, else (the last, None)."""
+    for spec in candidates:
+        target = RESOLVERS[language](spec, path, app)
+        if target:
+            return spec, target
+    return candidates[-1], None
+
+
+def _read_imports(path, language):
+    """([(line, candidate specs)], parsed) for one file; an unreadable file is ([], False)."""
+    try:
+        if language == "python":
+            return python_imports.read(path)
+        with open(path, errors="replace") as handle:
+            return _regex_imports(handle.read(), language), True
+    except OSError:
+        return [], False
+
+
+def _imports_in(path, language, roots, app, unparsed):
+    """(line, name, target, root) for each import in one file that resolves under a root.
+    A Python file the parser refuses, or any file that cannot be read, is appended to
+    `unparsed` (when it is a list)."""
+    found, parsed = _read_imports(path, language)
+    if not parsed and unparsed is not None:
+        unparsed.append(path)
     out = []
-    for regex in IMPORT_RES[language]:
-        for match in regex.finditer(text):
-            spec = match.group(1)
-            target = RESOLVERS[language](spec, path, app)
-            root = _under(target, roots) if target else None
-            if root is not None and target != os.path.abspath(path):
-                out.append((text.count("\n", 0, match.start()) + 1, _name_of(spec), target, root))
+    for line, candidates in found:
+        spec, target = _resolve_first(candidates, language, path, app)
+        root = _under(target, roots) if target else None
+        if root is not None and target != os.path.abspath(path):
+            out.append((line, _name_of(spec), target, root))
     return out
 
 
-def import_references(app, roots, language, skip_dirs):
+def import_references(app, roots, language, skip_dirs, unparsed=None):
     """Every (from file, line, name, referenced file, its root) for the imports in `app`
-    that resolve to a file under one of `roots`, first line per pair."""
+    that resolve to a file under one of `roots`, first line per pair. Files that could
+    not be parsed (or read) are appended to `unparsed` when it is a list."""
     if language not in IMPORT_RES:
         raise KeyError("no import reader for %r — one of: %s" % (language, ", ".join(sorted(IMPORT_RES))))
     references = []
     for path in source_files(app, skip_dirs, SUFFIXES[language]):
         seen = set()
-        for line, name, target, root in _imports_in(path, language, roots, app):
+        for line, name, target, root in _imports_in(path, language, roots, app, unparsed):
             if (name, target) not in seen:
                 seen.add((name, target))
                 references.append((path, line, name, target, root))
