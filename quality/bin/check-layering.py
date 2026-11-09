@@ -24,11 +24,18 @@ below; Views and the app entry (files at the root, layer `App`) on anything.
 `layering.always_allowed` names layers reachable from every other — there,
 `Testing/`, the "is this process the XCTest host" switch, since it is a fact
 about the process, not a layer. Directories in `layering.skip_dirs` are not
-read at all. `layering.unknown_layers` decides a layer `allowed` does not
-list (a new top-level directory, or `App` when it is left out): "allow", the
-default, leaves it unrestricted; "deny" lets it reference only itself and the
-`always_allowed` layers, and each such failure says the layer is undeclared.
-A layer named in `always_allowed` but not in `allowed` stays unrestricted.
+read at all — a skipped file is never judged as a source, so a shim under a
+skipped directory inside a layer can relay that layer's imports; skip only
+what holds no production code. `layering.unknown_layers` decides a layer
+`allowed` does not list (a new top-level directory, or `App` when it is left
+out): "allow", the default, leaves it unrestricted; "deny" lets it reference
+only itself and the `always_allowed` layers, and each such failure says the
+layer is undeclared. Under "deny" that holds for an `always_allowed` layer too
+— being reachable from everywhere is no licence to reach everywhere, or it
+relays (core -> testing/shim -> api); list it in `allowed` (null for
+unrestricted) to say what it may reach. A file's layer is where it really is:
+a symlink in one layer to a file in another is the other layer, and a symlink
+resolving outside every judged root is a violation naming the link.
 
 How a reference is read (`extractors/references.py`) depends on
 `layering.references`: `identifiers` — the default, for Swift — reads every
@@ -37,11 +44,15 @@ in the judged trees as owned by the file that declares it, and a capitalised
 identifier in another file's *code* that matches one as a reference to that
 file; `imports`, with `layering.language` one of python, typescript,
 javascript, rust, go, kotlin, java, resolves each import line to the file it
-names under a judged root — for python every import the `ast` parser finds
-(comma lists, semicolons, backslash continuations, `__import__` and
-`importlib.import_module` of a constant string, `from pkg import name` read as
-the submodule `pkg.name` when there is one), by line regex in a file that does
-not parse; `ast-grep` is the identifiers reading through a
+names under a judged root — for python every import the parser finds in the
+file's bytes, under its BOM or `coding:` cookie (`extractors/python_imports.py`:
+comma lists, semicolons, continuations, `from pkg import name` as the
+submodule `pkg.name` when there is one, and `importlib.import_module` /
+`__import__` / `runpy.run_module` / `exec` of a constant name by any name the
+file binds them to; out of scope: a computed module name, `getattr` with a
+computed attribute, `exec` of a computed string, `runpy.run_path`). A file
+the parser refuses is read statement by statement and named on a WARN line —
+a FAIL with `layering.unparseable: "fail"` (default "warn"); `ast-grep` is the identifiers reading through a
 parser, for nine languages, needing `ast-grep` installed. For `identifiers`: Comments and string literals are
 stripped first, because prose is not a dependency — a repo's headers name
 types in other layers constantly, and a mention in a comment would make every
@@ -129,10 +140,17 @@ class Rules:
         self.unknown_layers = section.get("unknown_layers", "allow")
         if self.unknown_layers not in ("allow", "deny"):
             raise KeyError('%s: "layering.unknown_layers" must be "allow" or "deny"; got %r' % (config.file, self.unknown_layers))
+        # A Python file the parser refuses, read statement by statement instead: "warn"
+        # names it, "fail" fails the check on it.
+        self.unparseable = section.get("unparseable", "warn")
+        if self.unparseable not in ("warn", "fail"):
+            raise KeyError('%s: "layering.unparseable" must be "warn" or "fail"; got %r' % (config.file, self.unparseable))
 
     def undeclared(self, layer):
-        """Whether `layer` is confined for being missing from `allowed` (unknown_layers: deny)."""
-        return self.unknown_layers == "deny" and layer not in self.allowed and layer not in self.always_allowed
+        """Whether `layer` is confined for being missing from `allowed` (unknown_layers:
+        deny) — an always_allowed layer too: being reachable from everywhere is no licence
+        to reach everywhere, or it relays."""
+        return self.unknown_layers == "deny" and layer not in self.allowed
 
     def permits(self, from_layer, to_layer):
         """Whether `from_layer` may reference `to_layer`."""
@@ -144,6 +162,14 @@ class Rules:
         return allowed is None or to_layer in allowed
 
     @staticmethod
+    def _exempt_key(item):
+        """(file, name, target or None) for one exemption entry; raises on a malformed one."""
+        file, name, target = item["file"], item["name"], item.get("target")
+        if not (isinstance(file, str) and isinstance(name, str)) or not (target is None or (isinstance(target, str) and target)):
+            raise ValueError(item)
+        return file, name, None if target is None else os.path.normpath(target)
+
+    @staticmethod
     def _root(config, entry):
         try:
             root, raw_exempt = entry["root"], entry["exempt"]
@@ -153,13 +179,10 @@ class Rules:
         exempt = {}
         for item in raw_exempt:
             try:
-                key, reason, target = (item["file"], item["name"]), item["reason"], item.get("target")
-            except (KeyError, TypeError, AttributeError):
-                raise KeyError('%s: every "layering.exempt" entry needs "file", "name" and "reason" (and may name a "target"); got %r'
-                               % (config.file, item))
-            if target is not None and not (isinstance(target, str) and target):
-                raise KeyError('%s: a "layering.exempt" entry\'s "target" is the referenced file\'s path; got %r' % (config.file, item))
-            exempt[key + (None if target is None else os.path.normpath(target),)] = reason
+                exempt[Rules._exempt_key(item)] = item["reason"]
+            except (KeyError, TypeError, AttributeError, ValueError):
+                raise KeyError('%s: every "layering.exempt" entry needs "file" and "name" (strings) and "reason", '
+                               'and may name a "target" (the referenced file\'s path); got %r' % (config.file, item))
         return Root(os.path.abspath(config.path(root)), exempt)
 
 
@@ -168,33 +191,67 @@ def layer_of(relative):
     return parts[0] if len(parts) > 1 else "App"
 
 
-def judge(app, exempt, rules, strict_dead, references_in_app):
+def place(path, roots):
+    """`path`'s real location relative to the first judged root that really contains it,
+    or None when its realpath is under none of them — a symlink resolving elsewhere."""
+    real = os.path.realpath(path)
+    for root in roots:
+        real_root = os.path.realpath(root)
+        if real.startswith(os.path.join(real_root, "")):
+            return os.path.relpath(real, real_root)
+    return None
+
+
+def classify(rules, roots, path, source, target, target_root):
+    """(referenced, note) for one reference: `referenced` None when the layering permits
+    it. Layers come from where a file really is, so a symlink in one layer to a file in
+    another relays nothing; a symlink resolving outside every judged root is a violation."""
+    as_written = os.path.relpath(target, target_root)
+    real = place(target, roots)
+    if real is None:
+        return as_written, "a symlink resolving to %s, outside every judged root" % os.path.realpath(target)
+    from_layer = layer_of(place(path, roots) or source)
+    if rules.permits(from_layer, layer_of(real)):
+        return None, ""
+    notes = ["through the symlink %s" % as_written] if real != as_written else []
+    if rules.undeclared(from_layer):
+        notes.append("layer %r is undeclared: `layering.allowed` does not list it and `unknown_layers` is deny" % from_layer)
+    return real, "; ".join(notes)
+
+
+def judge(app, exempt, rules, strict_dead, references_in_app, roots=None):
     """(violations, dead exemptions, judged, exempt used) for the tree at `app`,
     judged against `exempt` — `strict_dead` when a file an entry names but the
     tree lacks still counts as dead (the tree is one of the configured roots,
     not a fixture handed in with --app, where a missing file is almost always
     just a fixture that has no reason to reproduce every file in the list).
     `references_in_app` is what the extractor read: (from file, line, name,
-    referenced file, its root)."""
+    referenced file, its root). `roots` are the judged roots a file's real location is
+    placed under (default: `app` alone)."""
+    roots = roots or [app]
     references = references_in_app
     violations = []
     exempt_used = set()
     for path, number, name, target, target_root in references:
         source = os.path.relpath(path, app)
-        referenced = os.path.relpath(target, target_root)
-        if rules.permits(layer_of(source), layer_of(referenced)):
+        referenced, note = classify(rules, roots, path, source, target, target_root)
+        if referenced is None:
             continue
         key = exempt_key(exempt, source, name, referenced)
         if key is not None:
             exempt_used.add(key)
             continue
-        violations.append((source, number, name, referenced, rules.undeclared(layer_of(source))))
-    dead = sorted(
+        violations.append((source, number, name, referenced, note))
+    return violations, dead_entries(app, exempt, exempt_used, strict_dead), len(references), len(exempt_used)
+
+
+def dead_entries(app, exempt, exempt_used, strict_dead):
+    """The entries no violating reference used — for a file the tree lacks too, when strict."""
+    return sorted(
         (key for key in set(exempt) - exempt_used
          if strict_dead or os.path.isfile(os.path.join(app, key[0]))),
         key=lambda key: (key[0], key[1], key[2] or ""),
     )
-    return violations, dead, len(references), len(exempt_used)
 
 
 def exempt_key(exempt, source, name, referenced):
@@ -223,13 +280,13 @@ def reader_for(rules, owner_roots):
     if rules.reader == "imports":
         if rules.language not in references.IMPORT_RES:
             raise KeyError("no import reader for %r — one of: %s" % (rules.language, ", ".join(sorted(references.IMPORT_RES))))
-        return lambda app: references.import_references(app, owner_roots, rules.language, rules.skip_dirs)
+        return lambda app, unparsed: references.import_references(app, owner_roots, rules.language, rules.skip_dirs, unparsed)
     if rules.reader == "ast-grep":
         if rules.language not in references.ASTGREP:
             raise KeyError("no ast-grep reader for %r — one of: %s" % (rules.language, ", ".join(sorted(references.ASTGREP))))
-        return lambda app: references.astgrep_references(app, owner_roots, rules.language, rules.skip_dirs)
+        return lambda app, _unparsed: references.astgrep_references(app, owner_roots, rules.language, rules.skip_dirs)
     code, owner = references.build_owner_index(owner_roots, rules.skip_dirs, rules.extensions)
-    return lambda app: references.identifier_references(app, code, owner, rules.skip_dirs, rules.extensions)
+    return lambda app, _unparsed: references.identifier_references(app, code, owner, rules.skip_dirs, rules.extensions)
 
 
 def main():
@@ -254,26 +311,38 @@ def main():
 
     failed = False
     for app, exempt, strict_dead, label in targets:
+        unparsed = []
         try:
-            found = read(app)
+            found = read(app, unparsed)
         except references.ToolError as problem:
             print("FAIL: %s" % problem, file=sys.stderr)
             return 2
-        violations, dead, judged, exempt_used = judge(app, exempt, rules, strict_dead, found)
+        failed = print_unparsed(unparsed, app, rules, config) or failed
+        violations, dead, judged, exempt_used = judge(app, exempt, rules, strict_dead, found, owner_roots)
         failed = print_verdict(violations, dead, judged, exempt_used, label, config, args.quiet) or failed
     return 1 if failed else 0
+
+
+def print_unparsed(unparsed, app, rules, config):
+    """Name every file the parser refused — even under --quiet, since a file read by
+    the weaker line reader must never pass silently; True when that fails the check."""
+    failing = rules.unparseable == "fail"
+    for path in unparsed:
+        print("%s: %s does not parse as Python (or cannot be read) — its imports were read statement by statement, "
+              "which can miss some; %s" % ("FAIL" if failing else "WARN", os.path.relpath(path, app),
+              "`layering.unparseable` is \"fail\" in %s" % config.file if failing
+              else "set `layering.unparseable: \"fail\"` in %s to make this a failure" % config.file))
+    return failing and bool(unparsed)
 
 
 def print_violations(violations, where, config):
     print("FAIL: %d cross-layer reference(s) the layering does not allow%s." % (len(violations), where))
     print("Layers may depend downward only — see `layering.allowed` in %s." % config.file)
-    for source, number, name, target, undeclared in violations:
-        print("  %s:%d -> %s (%s)%s" % (source, number, name, target,
-              " — layer %r is undeclared: `layering.allowed` does not list it and `unknown_layers` is deny"
-              % layer_of(source) if undeclared else ""))
+    for source, number, name, target, note in violations:
+        print("  %s:%d -> %s (%s)%s" % (source, number, name, target, " — " + note if note else ""))
     print("Move the type to the layer that needs it, inject it, or — on purpose — add the entry to the "
           "`exempt` list%s of the `layering` section in %s, with the reason:" % (where, config.file))
-    for source, _number, name, target, _undeclared in violations:
+    for source, _number, name, target, _note in violations:
         print("  " + json.dumps({"file": source, "name": name, "target": target,
                                   "reason": "why it stands, and what would remove it"}))
 

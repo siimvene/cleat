@@ -187,6 +187,120 @@ try:
                   "core/local.py:2 -> auth", "core/star.py:1 -> auth", "core/package.py:1 -> api (api/__init__.py)",
                   "core/submodule.py:1 -> auth (api/auth.py)", "core/py2.py:2 -> auth"):
         check("parser: still read — %s" % where, code == 1 and where in out, out)
+
+    # ---- second pass: encodings, dynamic imports, relays through always_allowed and symlinks.
+    def write_bytes(path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(data)
+
+    # 1. The file is parsed from its bytes, the way Python reads it: a utf-7 cookie that
+    #    turns a comment into an import, a BOM, a latin-1 cookie. A file that still does
+    #    not parse is named, and under `unparseable: fail` fails the check.
+    kv = os.path.join(tmp, "kv5", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    body = b"x = 1; from kvart.api.auth import x\n"
+    write_bytes(os.path.join(kv, "core", "utf7.py"), b"# coding: utf-7\n# +AAo-from kvart.api.auth import x\n")
+    write_bytes(os.path.join(kv, "core", "bom.py"), b"\xef\xbb\xbf" + body)
+    write_bytes(os.path.join(kv, "core", "latin1.py"), b"# coding: latin-1\ncaf\xe9 = 1\n" + body)
+    code, out = run(kv_config(kv))
+    # utf-7's `+AAo-` decodes to a newline, so Python itself places that import on line 3.
+    for label, where in (("a utf-7 cookie decoding a comment into an import", "core/utf7.py:3"),
+                         ("a BOM", "core/bom.py:1"), ("a latin-1 cookie", "core/latin1.py:3")):
+        check("encoding: %s is read as Python reads it" % label, code == 1 and "%s -> auth (api/auth.py)" % where in out, out)
+    check("encoding: none of them is reported unparsed", "WARN" not in out, out)
+    kv = os.path.join(tmp, "kv6", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    write(os.path.join(kv, "core", "broken.py"), "import os, kvart.api.auth\ndef f(:\n    pass\n")
+    write(os.path.join(kv, "core", "nulls.py"), "x = 1\n#\0\nimport os; from kvart.api import auth\n")
+    write(os.path.join(kv, "core", "harmless.py"), "def f(:\n    pass\n")
+    code, out = run(kv_config(kv), "--quiet")
+    check("unparseable: a file the parser refuses is named, even under --quiet",
+          "WARN: core/broken.py does not parse" in out and "WARN: core/nulls.py" in out and "WARN: core/harmless.py" in out, out)
+    check("unparseable: its imports are still read, statement by statement",
+          code == 1 and "core/broken.py:1 -> auth (api/auth.py)" in out and "core/nulls.py:3 -> auth (api/auth.py)" in out, out)
+    os.remove(os.path.join(kv, "core", "broken.py")); os.remove(os.path.join(kv, "core", "nulls.py"))
+    code, out = run(kv_config(kv))
+    check("unparseable: by default a warning, not a failure", code == 0 and "WARN: core/harmless.py" in out, out)
+    code, out = run(kv_config(kv, unparseable="fail"))
+    check("unparseable: under \"fail\" the same file fails the check", code == 1 and "FAIL: core/harmless.py does not parse" in out, out)
+    code, out = run(kv_config(kv, unparseable="ignore"))
+    check("unparseable: a value other than warn or fail is refused", code == 2 and "unparseable" in out, out)
+
+    # 2. Dynamic imports by any name the file binds them to, with a constant (or constant-
+    #    concatenated) module name; a name computed at run time stays out of scope.
+    kv = os.path.join(tmp, "kv7", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    forms = {
+        "from_alias": "from importlib import import_module as im\nim('kvart.api.auth')\n",
+        "assigned": "import importlib\nload = importlib.import_module\nload('kvart.api.auth')\n",
+        "getattr_": "import importlib\ngetattr(importlib, 'import_module')('kvart.api.auth')\n",
+        "concat": "import importlib\nimportlib.import_module('kvart.' + 'api.auth')\n",
+        "kwarg": "import importlib\nimportlib.import_module(name='kvart.api.auth')\n",
+        "package_arg": "import importlib\nimportlib.import_module('.auth', 'kvart.api')\n",
+        # Relative to the caller's own package this would be core/auth.py (absent); the package argument wins.
+        "package_kwarg": "import importlib\nimportlib.import_module('.auth', package='kvart.api')\n",
+        "fromlist": "__import__('kvart.api', fromlist=['auth'])\n",
+        "exec_": "exec('from kvart.api.auth import x')\n",
+        "runpy_": "import runpy\nrunpy.run_module('kvart.api.auth')\n",
+        "module_alias": "import importlib as il\nil.import_module('kvart.api.auth')\n",
+        "dunder_kwarg": "__import__(name='kvart.api.auth')\n",
+        "builtins_attr": "import builtins\nbuiltins.__import__('kvart.api.auth')\n",
+    }
+    for stem, text in forms.items():
+        write(os.path.join(kv, "core", stem + ".py"), text)
+    write(os.path.join(kv, "core", "computed.py"), "import importlib\np = 'api'\nimportlib.import_module(f'kvart.{p}.auth')\n")
+    code, out = run(kv_config(kv))
+    for stem, text in forms.items():
+        line = text.count("\n")
+        check("dynamic: %s is read" % stem, code == 1 and "core/%s.py:%d -> auth (api/auth.py)" % (stem, line) in out, out)
+    check("dynamic: a module name computed at run time is out of scope", "core/computed.py" not in out, out)
+    # Only importlib's (or builtins', runpy's) own function counts: a method of some other
+    # object that happens to share the name is not an import, nor is an unbound bare name.
+    kv = os.path.join(tmp, "kv7b", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    write(os.path.join(kv, "core", "lookalike.py"),
+          "registry.import_module('kvart.api.auth')\nloader.__import__('kvart.api.auth')\nimport_module('kvart.api.auth')\n"
+          "getattr(registry, 'import_module')('kvart.api.auth')\n")
+    code, out = run(kv_config(kv))
+    check("dynamic: a method merely named import_module / __import__ is not an import", code == 0, out)
+
+    # 3. Under deny, an always_allowed layer that `allowed` does not list may not relay:
+    #    core -> testing/shim -> api. Listed as null in `allowed`, it is unrestricted on purpose.
+    kv = os.path.join(tmp, "kv8", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    write(os.path.join(kv, "core", "evil.py"), "from kvart.testing.shim import x\n")
+    write(os.path.join(kv, "testing", "shim.py"), "from kvart.api.auth import x\n")
+    code, out = run(kv_config(kv, unknown_layers="deny", always_allowed=["testing"]))
+    check("deny: an always_allowed layer missing from allowed cannot relay an upward import",
+          code == 1 and "testing/shim.py:1 -> auth (api/auth.py)" in out and "'testing' is undeclared" in out and "core/evil.py" not in out, out)
+    code, out = run(kv_config(kv, unknown_layers="deny", always_allowed=["testing"],
+                              allowed={"core": [], "api": ["core"], "testing": None, "App": None}))
+    check("deny: an always_allowed layer allowed lists as null is unrestricted on purpose", code == 0, out)
+    code, out = run(kv_config(kv, always_allowed=["testing"]))
+    check("allow: an always_allowed layer missing from allowed stays unrestricted", code == 0, out)
+
+    # 4. Layers come from where a file really is: a symlinked directory or file in core
+    #    pointing into api is api, a file symlinked out of every judged root is a
+    #    violation naming the link, and a source that is a symlink is judged where it points.
+    kv = os.path.join(tmp, "kv9", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    write(os.path.join(kv, "api", "helper.py"), "from kvart.api.auth import x\n")
+    write(os.path.join(tmp, "kv9", "outside", "far.py"), "x = 1\n")
+    os.makedirs(os.path.join(kv, "core"))
+    os.symlink(os.path.join("..", "api"), os.path.join(kv, "core", "apilink"))
+    os.symlink(os.path.join("..", "api", "auth.py"), os.path.join(kv, "core", "authalias.py"))
+    os.symlink(os.path.join("..", "..", "outside"), os.path.join(kv, "core", "farlink"))
+    os.symlink(os.path.join("..", "api", "helper.py"), os.path.join(kv, "core", "helper_alias.py"))
+    write(os.path.join(kv, "core", "evil.py"), "from kvart.core.apilink.auth import x\nfrom kvart.core.authalias import y\nfrom kvart.core.farlink.far import z\n")
+    code, out = run(kv_config(kv))
+    check("symlink: a directory link into another layer is that layer",
+          code == 1 and "core/evil.py:1 -> auth (api/auth.py) — through the symlink core/apilink/auth.py" in out, out)
+    check("symlink: a file link into another layer is that layer",
+          "core/evil.py:2 -> authalias (api/auth.py) — through the symlink core/authalias.py" in out, out)
+    check("symlink: a link resolving outside every judged root is a violation naming the link",
+          "core/evil.py:3 -> far (core/farlink/far.py) — a symlink resolving to" in out and "outside every judged root" in out, out)
+    check("symlink: a source that is a link is judged in the layer it points into", "core/helper_alias.py" not in out, out)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

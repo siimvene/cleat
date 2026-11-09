@@ -276,6 +276,9 @@ try:
           json.dumps({"file": EXEMPT_SOURCE, "name": EXEMPT_TYPE, "target": "Services/Owner.swift"})[:-1] in out, out)
     code, out = run(write_layer_config("targeted.json", [dict(right, target=["Services/Owner.swift"])]), "--app", app)
     check("a target that is not a path is refused", code == 2 and '"target"' in out, out)
+    code, out = run(write_layer_config("targeted.json", [dict(right, file=[])]), "--app", app)
+    check("an entry whose file is not a string is refused with the config diagnostic, not a traceback",
+          code == 2 and '"file"' in out and "Traceback" not in out, out)
 
     # --- unknown_layers: a layer `allowed` does not list is unrestricted by
     # default and, under "deny", may reach only itself and always_allowed layers.
