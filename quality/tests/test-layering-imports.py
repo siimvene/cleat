@@ -339,7 +339,18 @@ try:
     os.symlink(os.path.join("..", "..", "outside", "src.py"), os.path.join(kv, "core", "src_link.py"))
     code, out = run(kv_config(kv))
     check("symlink: a source linked out of every judged root is a violation naming the link",
-          code == 1 and "core/src_link.py:1 -> base (core/base.py) — the source is a symlink resolving to ../outside/src.py" in out, out)
+          code == 1 and "../outside/src.py:1 -> base (core/base.py) — the source is the symlink core/src_link.py" in out, out)
+    # Keyed by where the source link really points: an entry for it passes, and retargeting
+    # the link to another outside file reports the new source and retires the entry.
+    by_source = {"file": "../outside/src.py", "name": "base", "target": "core/base.py", "reason": "vendored"}
+    code, out = run(kv_config(kv, exempt=[by_source]))
+    check("symlink: an exemption for an out-of-root source link names where it really points", code == 0 and "(1 exempt)" in out, out)
+    write(os.path.join(tmp, "kv11", "outside2", "src.py"), "from kvart.core.base import x\n")
+    os.remove(os.path.join(kv, "core", "src_link.py"))
+    os.symlink(os.path.join("..", "..", "outside2", "src.py"), os.path.join(kv, "core", "src_link.py"))
+    code, out = run(kv_config(kv, exempt=[by_source]))
+    check("symlink: retargeting the source link reports the new source and retires the entry",
+          code == 1 and "../outside2/src.py:1 -> base (core/base.py)" in out and "('../outside/src.py', 'base', 'core/base.py')" in out, out)
     os.remove(os.path.join(kv, "core", "src_link.py"))
     os.symlink(os.path.join("..", "..", "outside"), os.path.join(kv, "core", "farlink"))
     write(os.path.join(kv, "core", "evil.py"), "from kvart.core.farlink.far import z\n")
@@ -351,6 +362,30 @@ try:
     code, out = run(kv_config(kv, exempt=[pinned]))
     check("symlink: retargeting the link reports the new target and retires the entry",
           code == 1 and "core/evil.py:1 -> far (../outside2/far.py)" in out and "('core/evil.py', 'far', '../outside/far.py')" in out, out)
+
+    # ---- fourth pass: global / nonlocal bind where Python binds them, a relative
+    # __import__ naming only its level, and importlib's own __import__.
+    kv = os.path.join(tmp, "kv12", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    write(os.path.join(kv, "core", "rebound.py"),
+          "import importlib\ndef f():\n    global importlib\n    importlib = registry\nimportlib.import_module('kvart.api.auth')\n")
+    fourth = {
+        "global_alias": ("def f():\n    global im\n    from importlib import import_module as im\nim('kvart.api.auth')\n", 4),
+        "nonlocal_alias": ("def outer():\n    load = None\n    def inner():\n        nonlocal load\n"
+                           "        from importlib import import_module as load\n    inner()\n    load('kvart.api.auth')\n", 7),
+        "importlib_dunder": ("import importlib\nimportlib.__import__('kvart.api.auth')\n", 2),
+        "from_importlib_dunder": ("from importlib import __import__ as imp\nimp('kvart.api.auth')\n", 2),
+    }
+    for stem, (text, _line) in fourth.items():
+        write(os.path.join(kv, "core", stem + ".py"), text)
+    write(os.path.join(kv, "api", "relative.py"), "__import__('', globals(), None, ['auth'], 1)\n")
+    code, out = run(kv_config(kv, allowed={"core": [], "api": [], "App": None}))
+    check("global: a module name rebound through `global` is shadowed at module scope", "core/rebound.py" not in out, out)
+    for stem, (_text, line) in fourth.items():
+        check("fourth pass: %s is read" % stem, code == 1 and "core/%s.py:%d -> auth (api/auth.py)" % (stem, line) in out, out)
+    refs = references.import_references(kv, [kv], "python", set())
+    check("dunder: a relative __import__ naming only its level resolves its fromlist entry",
+          any(r[0].endswith("api/relative.py") and r[3].endswith("api/auth.py") for r in refs), str(refs))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

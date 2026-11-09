@@ -36,8 +36,9 @@ relays (core -> testing/shim -> api); list it in `allowed` (null for
 unrestricted) to say what it may reach. A file's layer is where it really is:
 a symlink in one layer to a file in another is the other layer, and a symlink
 — source or target — resolving outside every judged root is a violation naming
-the link; its exemption `target` is where the link really points, relative to
-the root, so retargeting the link retires the entry.
+the link; that end is printed and keyed (exemption `file` or `target`) by where
+the link really points, relative to the root, so retargeting it retires the
+entry.
 
 How a reference is read (`extractors/references.py`) depends on
 `layering.references`: `identifiers` — the default, for Swift — reads every
@@ -52,7 +53,8 @@ comma lists, semicolons, continuations, `from pkg import name` as the
 submodule `pkg.name` when there is one, and `importlib.import_module` /
 `__import__` / `runpy.run_module` / `exec` of a constant name by any name the
 file binds them to; out of scope: a computed module name, `getattr` with a
-computed attribute, `exec` of a computed string, `runpy.run_path`). A file
+computed attribute, `exec` of a computed string, `runpy.run_path`, walrus-bound
+aliases, star imports from importlib/runpy). A file
 the parser refuses is read statement by statement and named on a WARN line —
 a FAIL with `layering.unparseable: "fail"` (default "warn"); `ast-grep` is the identifiers reading through a
 parser, for nine languages, needing `ast-grep` installed. For `identifiers`: Comments and string literals are
@@ -211,33 +213,37 @@ def outside_root(path, root):
 
 
 def escapes(roots, path, app, target, target_root):
-    """(referenced, note) when the reference's target or its source is a symlink resolving
-    outside every judged root — always a violation — else None."""
-    if place(target, roots) is None:
-        return (outside_root(target, target_root), "through the symlink %s, which resolves outside every judged root"
-                % os.path.relpath(target, target_root))
+    """(source, referenced, note) when the reference's source or target is a symlink
+    resolving outside every judged root — always a violation — else None. Either end
+    is named by where it really points, relative to its root, so an exemption keys on
+    that and retargeting the link retires it."""
+    source, notes = os.path.relpath(path, app), []
     if place(path, roots) is None:
-        return (place(target, roots), "the source is a symlink resolving to %s, outside every judged root"
-                % outside_root(path, app))
-    return None
+        source = outside_root(path, app)
+        notes.append("the source is the symlink %s, which resolves outside every judged root" % os.path.relpath(path, app))
+    referenced = place(target, roots)
+    if referenced is None:
+        referenced = outside_root(target, target_root)
+        notes.append("through the symlink %s, which resolves outside every judged root" % os.path.relpath(target, target_root))
+    return (source, referenced, "; ".join(notes)) if notes else None
 
 
 def classify(rules, roots, path, app, target, target_root):
-    """(referenced, note) for one reference: `referenced` None when the layering permits
-    it. Layers come from where a file really is, so a symlink in one layer to a file in
-    another relays nothing; a source or target symlink resolving outside every judged
-    root is a violation."""
+    """(source, referenced, note) for one reference: `referenced` None when the layering
+    permits it. Layers come from where a file really is, so a symlink in one layer to a
+    file in another relays nothing; a source or target symlink resolving outside every
+    judged root is a violation."""
     escaped = escapes(roots, path, app, target, target_root)
     if escaped:
         return escaped
-    as_written, real = os.path.relpath(target, target_root), place(target, roots)
+    source, as_written, real = os.path.relpath(path, app), os.path.relpath(target, target_root), place(target, roots)
     from_layer = layer_of(place(path, roots))
     if rules.permits(from_layer, layer_of(real)):
-        return None, ""
+        return source, None, ""
     notes = ["through the symlink %s" % as_written] if real != as_written else []
     if rules.undeclared(from_layer):
         notes.append("layer %r is undeclared: `layering.allowed` does not list it and `unknown_layers` is deny" % from_layer)
-    return real, "; ".join(notes)
+    return source, real, "; ".join(notes)
 
 
 def judge(app, exempt, rules, strict_dead, references_in_app, roots=None):
@@ -254,8 +260,7 @@ def judge(app, exempt, rules, strict_dead, references_in_app, roots=None):
     violations = []
     exempt_used = set()
     for path, number, name, target, target_root in references:
-        source = os.path.relpath(path, app)
-        referenced, note = classify(rules, roots, path, app, target, target_root)
+        source, referenced, note = classify(rules, roots, path, app, target, target_root)
         if referenced is None:
             continue
         key = exempt_key(exempt, source, name, referenced)

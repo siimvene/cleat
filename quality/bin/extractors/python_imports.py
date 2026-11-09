@@ -17,12 +17,17 @@ decodes into a real import line is read as that import. Read are:
   a method of any other object that shares the name is not an import. Bindings
   are per scope (module, function, lambda, class, comprehension), aliases come
   from plain, chained and annotated assignments, and a parameter, `del` or other
-  binding of the name in a scope shadows it there;
+  binding of the name in a scope shadows it there (`global` / `nonlocal` bind
+  where Python binds them; `name = None` is a placeholder, not a shadow);
 - `exec` / `eval` of a constant string, by parsing that string.
 
 Out of scope, by design: a module name computed at run time (an f-string with a
 variable, a name read from config), `getattr` with a computed attribute,
-`exec`/`eval` of a computed string, `runpy.run_path`, and import hooks. A reader
+`exec`/`eval` of a computed string, `runpy.run_path`, import hooks, aliases
+bound by a walrus (`(load := importlib.import_module)`), names a star import
+from importlib/runpy brings in, and comment / CRLF edge cases of the line
+reader (it runs only on files Python cannot parse, which `unparseable: fail`
+refuses anyway). A reader
 that chased those would be an interpreter.
 
 A file the parser refuses (a syntax error, a null byte, nesting past the
@@ -41,7 +46,7 @@ import warnings
 DYNAMIC = {"import_module": "import_module", "__import__": "__import__", "run_module": "run_module",
            "exec": "exec", "eval": "exec"}
 # The modules a dynamic callee belongs to, and which of their names are one.
-ALIASABLE = {"importlib": ("import_module",), "builtins": ("__import__", "exec", "eval"), "runpy": ("run_module",)}
+ALIASABLE = {"importlib": ("import_module", "__import__"), "builtins": ("__import__", "exec", "eval"), "runpy": ("run_module",)}
 # Bare names that are dynamic without being imported: the builtins.
 BUILTINS = {name: DYNAMIC[name] for name in ALIASABLE["builtins"]}
 NAME_KEYWORDS = ("name", "mod_name", "source")
@@ -105,6 +110,7 @@ def _static_imports(node):
 # ---------------------------------------------------------------- dynamic imports
 
 SHADOW = ("shadow", None)
+PLACEHOLDER = ("placeholder", None)
 MAX_ALIAS_DEPTH = 20
 
 
@@ -115,22 +121,63 @@ class Scope:
     flow-insensitive: a name with any binding that is not the dynamic machinery is
     shadowed in its whole scope, as Python makes it local to the whole scope."""
 
-    def __init__(self, parent=None, is_class=False):
+    def __init__(self, parent=None, is_class=False, body=()):
         self.parent, self.is_class = parent, is_class
-        self.entries, self.outer = {}, set()
+        self.root = parent.root if parent else self
+        self.entries = {}
+        self.globals, self.nonlocals = _declared(body)
 
     def bind(self, name, entry):
-        self.entries.setdefault(name, []).append(entry)
+        """Record a binding where Python makes it: a `global` name in the module scope, a
+        `nonlocal` one in the enclosing function scope, any other here."""
+        self._home(name).entries.setdefault(name, []).append(entry)
+
+    def _home(self, name):
+        if name in self.globals:
+            return self.root
+        if name in self.nonlocals:
+            scope = self.parent
+            while scope is not None and scope.is_class:
+                scope = scope.parent
+            return scope or self.root
+        return self
 
     def owner_of(self, name):
         """The scope whose binding a reference to `name` here sees, else None. A class
-        body's names are not visible in the functions nested in it."""
+        body's names are not visible in the functions nested in it; a `global` name is
+        read from the module scope."""
         scope, here = self, True
         while scope is not None:
-            if (here or not scope.is_class) and name in scope.entries and name not in scope.outer:
-                return scope
+            found = scope._holds(name) if here or not scope.is_class else None
+            if found is not None:
+                return found or None
             scope, here = scope.parent, False
         return None
+
+    def _holds(self, name):
+        """This scope's answer for `name`: the scope that holds it, False when it is a
+        `global` the module does not bind, None to keep looking outward."""
+        if name in self.globals:
+            return self.root if name in self.root.entries else False
+        return self if name in self.entries and name not in self.nonlocals else None
+
+
+NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                 ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _declared(body):
+    """(global names, nonlocal names) a scope's own statements declare, nested scopes
+    excluded — read before any binding, wherever in the body the declaration sits."""
+    names = {ast.Global: set(), ast.Nonlocal: set()}
+    stack = list(body)
+    while stack:
+        node = stack.pop()
+        if type(node) in names:
+            names[type(node)].update(node.names)
+        elif not isinstance(node, NESTED_SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
+    return names[ast.Global], names[ast.Nonlocal]
 
 
 def _children(node, scope, calls):
@@ -189,8 +236,8 @@ def _visit_ann_assign(node, scope, calls):
     return pending + _assign_target(node.target, node.value, scope)
 
 
-def _visit_outer(node, scope, calls):
-    scope.outer.update(node.names)
+def _visit_declaration(node, scope, calls):
+    """`global` / `nonlocal`: read up front by the scope (`_declared`), nothing to visit."""
     return []
 
 
@@ -221,16 +268,16 @@ def _visit_function(node, scope, calls):
         scope.bind(node.name, SHADOW)
     names, annotations = _parameters(node.args)
     outer = _outer_parts(node, annotations)
-    inner = Scope(scope)
+    body = node.body if isinstance(node.body, list) else [node.body]
+    inner = Scope(scope, body=body)
     for name in names:
         inner.bind(name, SHADOW)
-    body = node.body if isinstance(node.body, list) else [node.body]
     return [(n, scope) for n in outer] + [(n, inner) for n in body]
 
 
 def _visit_class(node, scope, calls):
     scope.bind(node.name, SHADOW)
-    inner = Scope(scope, is_class=True)
+    inner = Scope(scope, is_class=True, body=node.body)
     outer = node.decorator_list + node.bases + [k.value for k in node.keywords]
     return [(n, scope) for n in outer] + [(n, inner) for n in node.body]
 
@@ -241,7 +288,7 @@ def _visit_comprehension(node, scope, calls):
 
 VISITORS = {
     ast.Call: _visit_call, ast.Name: _visit_name, ast.Import: _visit_import, ast.ImportFrom: _visit_import_from,
-    ast.Assign: _visit_assign, ast.AnnAssign: _visit_ann_assign, ast.Global: _visit_outer, ast.Nonlocal: _visit_outer,
+    ast.Assign: _visit_assign, ast.AnnAssign: _visit_ann_assign, ast.Global: _visit_declaration, ast.Nonlocal: _visit_declaration,
     ast.ExceptHandler: _visit_bound_name, ast.MatchAs: _visit_bound_name, ast.MatchStar: _visit_bound_name,
     ast.MatchMapping: _visit_bound_name, ast.FunctionDef: _visit_function, ast.AsyncFunctionDef: _visit_function,
     ast.Lambda: _visit_function, ast.ClassDef: _visit_class, ast.ListComp: _visit_comprehension,
@@ -265,13 +312,17 @@ def resolve(name, scope, depth=0):
     owner = scope.owner_of(name)
     if owner is None:
         return ("function", BUILTINS[name]) if name in BUILTINS else None
-    values = {_entry_value(entry, owner, depth) for entry in owner.entries[name]}
+    values = {_entry_value(entry, owner, depth) for entry in owner.entries[name]} - {PLACEHOLDER}
     return values.pop() if len(values) == 1 else None
 
 
 def _entry_value(entry, scope, depth):
+    """A binding's value; `name = None` is a placeholder (`_load = None`, later bound to
+    the machinery), which calling could not reach, so it shadows nothing."""
     if entry[0] != "assign":
         return None if entry is SHADOW else entry
+    if isinstance(entry[1], ast.Constant) and entry[1].value is None:
+        return PLACEHOLDER
     return callee_value(entry[1], scope, depth + 1) if depth < MAX_ALIAS_DEPTH else None
 
 
@@ -327,7 +378,7 @@ def _arg(call, index, keywords):
 def _call_imports(call, scope, depth):
     kind = callee_kind(call.func, scope)
     name = const_str(_arg(call, 0, NAME_KEYWORDS)) if kind else None
-    if not name:
+    if name is None or (not name and kind != "__import__"):
         return []
     if kind == "exec":
         return _exec_imports(call.lineno, name, depth)
@@ -349,9 +400,13 @@ def _absolute(name, package):
 
 def _dunder_specs(call, name):
     """Candidate specs per `__import__(name, globals, locals, fromlist, level)`: each
-    fromlist entry as a submodule of `name` first, else `name` itself."""
-    base = "." * _const_int(_arg(call, 4, ("level",))) + name
-    specs = [[base + "." + entry, base] for entry in _const_strs(_arg(call, 3, ("fromlist",))) if entry and entry != "*"]
+    fromlist entry as a submodule of `name` first, else `name` itself. A relative one
+    may name nothing but its level: `__import__("", fromlist=["x"], level=1)`."""
+    level = _const_int(_arg(call, 4, ("level",)))
+    if not name and not level:
+        return []
+    base, joiner = "." * level + name, "." if name else ""
+    specs = [[base + joiner + entry, base] for entry in _const_strs(_arg(call, 3, ("fromlist",))) if entry and entry != "*"]
     return specs or [[base]]
 
 
