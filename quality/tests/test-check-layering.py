@@ -6,7 +6,9 @@ The check is regex over a judged tree and its failure mode is silence: a
 line, and it goes on printing `OK: N cross-file references obey the layering`
 while judging nothing. So what counts as a reference, what does not (a
 comment, a string), which line is reported, and both halves of the ratchet —
-an exempt pair passing, a dead exemption failing — are driven here through the
+an exempt pair passing, a dead exemption failing, an exemption keyed by
+its `target` covering that reference only, and `unknown_layers: deny`
+confining a layer `allowed` does not list — are driven here through the
 real script against a throwaway tree handed to it with `--app`, under a
 fixture `quality.json` this test writes and hands over with `--config`. The
 fixture's `layering` section carries the layer table the check was written for
@@ -245,6 +247,49 @@ try:
         [{"file": CROSS_SOURCE, "name": CROSS_TYPE, "reason": "a runtime file naming a type that moved into the other root; inject it"}]
     ))
     check("the pair passes once exempt in its own root", code == 0, out)
+
+    # --- An exemption may carry the referenced file as "target": it then covers
+    # that reference only, a same-named reference resolved elsewhere fails, and a
+    # dead targeted entry is named with its target. Swift reads by declared name, so
+    # the target is the file declaring the type.
+    def write_layer_config(name, exempt, **extra):
+        path = os.path.join(tmp, name)
+        section = {"skip_dirs": [], "always_allowed": ["Testing"], "roots": [{"root": os.path.join(tmp, "unused"), "exempt": exempt}],
+                   "allowed": {"Extensions": [], "Models": ["Extensions"], "Services": ["Models", "Extensions"], "App": None, "Testing": None}}
+        section.update(extra)
+        with open(path, "w") as handle:
+            json.dump({"layering": section}, handle)
+        return path
+
+    app = os.path.join(tmp, "targeted")
+    write(app, "Services/Owner.swift", "struct %s {}\n" % EXEMPT_TYPE)
+    write(app, EXEMPT_SOURCE, "struct Ref { let x = %s() }\n" % EXEMPT_TYPE)
+    right = {"file": EXEMPT_SOURCE, "name": EXEMPT_TYPE, "target": "Services/Owner.swift", "reason": "inject it"}
+    wrong = dict(right, target="Services/Elsewhere.swift")
+    code, out = run(write_layer_config("targeted.json", [right]), "--app", app)
+    check("an exemption whose target is the referenced file passes", code == 0 and "(1 exempt)" in out, out)
+    code, out = run(write_layer_config("targeted.json", [wrong]), "--app", app)
+    check("an exemption naming another target does not cover the reference",
+          code == 1 and "%s:1 -> %s (Services/Owner.swift)" % (EXEMPT_SOURCE, EXEMPT_TYPE) in out, out)
+    check("and is dead, named with its target", "(%r, %r, %r)" % (EXEMPT_SOURCE, EXEMPT_TYPE, "Services/Elsewhere.swift") in out, out)
+    check("and the hint prints the entry to add, target included",
+          json.dumps({"file": EXEMPT_SOURCE, "name": EXEMPT_TYPE, "target": "Services/Owner.swift"})[:-1] in out, out)
+    code, out = run(write_layer_config("targeted.json", [dict(right, target=["Services/Owner.swift"])]), "--app", app)
+    check("a target that is not a path is refused", code == 2 and '"target"' in out, out)
+
+    # --- unknown_layers: a layer `allowed` does not list is unrestricted by
+    # default and, under "deny", may reach only itself and always_allowed layers.
+    app = os.path.join(tmp, "undeclared")
+    write(app, "Services/Clock.swift", "struct Clock {}\n")
+    write(app, "Testing/Switch.swift", "enum TestSwitch {}\n")
+    write(app, "Helpers/Format.swift", "struct Format { let c = Clock(); let s = TestSwitch.self; let o = Other() }\n")
+    write(app, "Helpers/Other.swift", "struct Other {}\n")
+    code, out = run(write_layer_config("undeclared.json", []), "--app", app)
+    check("an undeclared layer is unrestricted by default", code == 0, out)
+    code, out = run(write_layer_config("undeclared.json", [], unknown_layers="deny"), "--app", app)
+    check("under unknown_layers deny an undeclared layer reaching another fails, saying it is undeclared",
+          code == 1 and "Helpers/Format.swift:1 -> Clock (Services/Clock.swift)" in out and "'Helpers' is undeclared" in out, out)
+    check("but reaches itself and always_allowed layers", "TestSwitch" not in out and "-> Other" not in out, out)
 
     # --- A config without the section, without the roots key, or an entry
     # short of a field, is an error, not a pass.

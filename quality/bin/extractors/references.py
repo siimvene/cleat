@@ -6,7 +6,10 @@ declares it, and a capitalised identifier in another file's code (comments and
 strings stripped by regex) is a reference to that file. `imports` is for
 languages with explicit imports — Python, TypeScript/JavaScript, Rust, Go,
 Kotlin, Java: each import line is resolved to a file under one of the judged
-roots. `ast-grep` is the identifiers reading done by a parser, for any of
+roots — for Python each import the parser (`ast`) finds, so a comma list, an
+import after a semicolon, a backslash continuation and `__import__` /
+`importlib.import_module` of a constant string are read too; a file that does
+not parse falls back to the line regexes. `ast-grep` is the identifiers reading done by a parser, for any of
 nine languages: declarations are the grammar's declaration nodes, references
 its identifier tokens, so a name in a comment or a string is never a
 reference and no per-language regex is needed. All three yield the same
@@ -14,12 +17,14 @@ shape — (referencing file, line, name, referenced file, its root) — so the
 layering and reachability judgments read any of them.
 """
 
+import ast
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import warnings
 
 from . import patterns
 
@@ -209,18 +214,80 @@ def _name_of(spec):
     return re.split(r"[.:]+", spec.strip(".:"))[-1] or spec
 
 
+DYNAMIC_IMPORTS = ("__import__", "import_module")
+
+
+def _dynamic_import(node):
+    """The constant module name a `__import__(...)` / `importlib.import_module(...)` /
+    `import_module(...)` call names, else None."""
+    func = node.func
+    called = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+    if called not in DYNAMIC_IMPORTS or not node.args:
+        return None
+    first = node.args[0]
+    return first.value if isinstance(first, ast.Constant) and isinstance(first.value, str) and first.value else None
+
+
+def _from_import(node):
+    """[(line, candidate specs)] per name of one `from ... import ...`: the submodule
+    `pkg.name` first (not for `*`), then the package itself."""
+    base = "." * node.level + (node.module or "")
+    joiner = "." if node.module else ""
+    return [(node.lineno, ([] if alias.name == "*" else [base + joiner + alias.name]) + [base]) for alias in node.names]
+
+
+def _node_imports(node):
+    """[(line, candidate specs)] one parsed node contributes: an import statement, or a
+    dynamic import of a constant module name."""
+    if isinstance(node, ast.Import):
+        return [(node.lineno, [alias.name]) for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        return _from_import(node)
+    spec = _dynamic_import(node) if isinstance(node, ast.Call) else None
+    return [(node.lineno, [spec])] if spec else []
+
+
+def _python_imports(text):
+    """[(line, candidate specs)] for every import the parser finds, or None when the
+    file does not parse. The first candidate that resolves is the reference: for
+    `from pkg import name` that is `pkg.name` when it is a submodule, else `pkg`."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    return sorted((item for node in ast.walk(tree) for item in _node_imports(node)), key=lambda item: item[0])
+
+
+def _regex_imports(text, language):
+    """[(line, [spec])] for each match of the language's import regexes."""
+    return [(text.count("\n", 0, match.start()) + 1, [match.group(1)])
+            for regex in IMPORT_RES[language] for match in regex.finditer(text)]
+
+
+def _resolve_first(candidates, language, path, app):
+    """(spec, file) for the first candidate spec that resolves, else (the last, None)."""
+    for spec in candidates:
+        target = RESOLVERS[language](spec, path, app)
+        if target:
+            return spec, target
+    return candidates[-1], None
+
+
 def _imports_in(path, language, roots, app):
     """(line, name, target, root) for each import in one file that resolves under a root."""
     with open(path, errors="replace") as handle:
         text = handle.read()
+    found = _python_imports(text) if language == "python" else None
+    if found is None:
+        found = _regex_imports(text, language)
     out = []
-    for regex in IMPORT_RES[language]:
-        for match in regex.finditer(text):
-            spec = match.group(1)
-            target = RESOLVERS[language](spec, path, app)
-            root = _under(target, roots) if target else None
-            if root is not None and target != os.path.abspath(path):
-                out.append((text.count("\n", 0, match.start()) + 1, _name_of(spec), target, root))
+    for line, candidates in found:
+        spec, target = _resolve_first(candidates, language, path, app)
+        root = _under(target, roots) if target else None
+        if root is not None and target != os.path.abspath(path):
+            out.append((line, _name_of(spec), target, root))
     return out
 
 

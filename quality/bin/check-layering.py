@@ -24,7 +24,11 @@ below; Views and the app entry (files at the root, layer `App`) on anything.
 `layering.always_allowed` names layers reachable from every other — there,
 `Testing/`, the "is this process the XCTest host" switch, since it is a fact
 about the process, not a layer. Directories in `layering.skip_dirs` are not
-read at all.
+read at all. `layering.unknown_layers` decides a layer `allowed` does not
+list (a new top-level directory, or `App` when it is left out): "allow", the
+default, leaves it unrestricted; "deny" lets it reference only itself and the
+`always_allowed` layers, and each such failure says the layer is undeclared.
+A layer named in `always_allowed` but not in `allowed` stays unrestricted.
 
 How a reference is read (`extractors/references.py`) depends on
 `layering.references`: `identifiers` — the default, for Swift — reads every
@@ -33,7 +37,11 @@ in the judged trees as owned by the file that declares it, and a capitalised
 identifier in another file's *code* that matches one as a reference to that
 file; `imports`, with `layering.language` one of python, typescript,
 javascript, rust, go, kotlin, java, resolves each import line to the file it
-names under a judged root; `ast-grep` is the identifiers reading through a
+names under a judged root — for python every import the `ast` parser finds
+(comma lists, semicolons, backslash continuations, `__import__` and
+`importlib.import_module` of a constant string, `from pkg import name` read as
+the submodule `pkg.name` when there is one), by line regex in a file that does
+not parse; `ast-grep` is the identifiers reading through a
 parser, for nine languages, needing `ast-grep` installed. For `identifiers`: Comments and string literals are
 stripped first, because prose is not a dependency — a repo's headers name
 types in other layers constantly, and a mention in a comment would make every
@@ -43,8 +51,10 @@ reported lets a person see which it was.
 
 It is a ratchet, per root. Every reference that violated the rules when its
 root was added is in that root's `exempt` — a list of `{"file", "name",
-"reason"}` objects, the file relative to the root, the name the referenced
-type, the reason what it would take to remove it — so the check landed green
+"target", "reason"}` objects, the file relative to the root, the name the
+referenced type (for imports, the import's last segment), the target the
+referenced file relative to its own root as the failure line prints it in
+parentheses, the reason what it would take to remove it — so the check landed green
 for that root and one more is a decision somebody makes on purpose. The
 success line prints, for each root, how many are exempt beside how many
 references were judged, so no root's list can grow quietly. An entry that no
@@ -55,7 +65,12 @@ moment the reference goes. An exemption belongs to one root; it is never read
 against another root's tree, so a reference moved from one judged root to the
 other fails there rather than quietly inheriting the old root's exemption. To
 add an entry: the reference must already exist and violate the rules in that
-root, since the check fails on an entry that names nothing.
+root, since the check fails on an entry that names nothing. `target` is
+optional for older lists: an entry without it matches every reference from
+that file by that name, whatever file it resolves to, so `from app.billing
+import x` would ride on an entry written for `models/billing.py`. New
+entries carry it — the failure prints each one ready to paste, target included
+— and an entry with a target covers that reference only.
 
 It reads the tree and starts no build, so it is safe while the app is running.
 
@@ -66,6 +81,7 @@ It reads the tree and starts no build, so it is safe while the app is running.
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -81,8 +97,9 @@ class Root:
 
     def __init__(self, path, exempt):
         self.path = path
-        # (referencing file, referenced type) -> the reason it stands. Paths are
-        # relative to this root.
+        # (referencing file, referenced name, referenced file or None) -> the reason it
+        # stands. Paths are relative to this root (the referenced file to its own root);
+        # None is an entry without "target", which matches the name whatever it resolves to.
         self.exempt = exempt
 
 
@@ -107,11 +124,24 @@ class Rules:
         self.extensions = tuple(section.get("extensions", [".swift"]))
         if self.reader not in ("identifiers", "imports", "ast-grep"):
             raise KeyError('%s: "layering.references" must be "identifiers", "imports" or "ast-grep"; got %r' % (config.file, self.reader))
+        # A layer `allowed` does not list: "allow" leaves it unrestricted, "deny" confines
+        # it to itself and the always-allowed layers.
+        self.unknown_layers = section.get("unknown_layers", "allow")
+        if self.unknown_layers not in ("allow", "deny"):
+            raise KeyError('%s: "layering.unknown_layers" must be "allow" or "deny"; got %r' % (config.file, self.unknown_layers))
+
+    def undeclared(self, layer):
+        """Whether `layer` is confined for being missing from `allowed` (unknown_layers: deny)."""
+        return self.unknown_layers == "deny" and layer not in self.allowed and layer not in self.always_allowed
 
     def permits(self, from_layer, to_layer):
         """Whether `from_layer` may reference `to_layer`."""
-        allowed = self.allowed.get(from_layer)
-        return allowed is None or to_layer == from_layer or to_layer in allowed or to_layer in self.always_allowed
+        if to_layer == from_layer or to_layer in self.always_allowed:
+            return True
+        if from_layer not in self.allowed:
+            return not self.undeclared(from_layer)
+        allowed = self.allowed[from_layer]
+        return allowed is None or to_layer in allowed
 
     @staticmethod
     def _root(config, entry):
@@ -123,10 +153,13 @@ class Rules:
         exempt = {}
         for item in raw_exempt:
             try:
-                exempt[(item["file"], item["name"])] = item["reason"]
-            except (KeyError, TypeError):
-                raise KeyError('%s: every "layering.exempt" entry needs "file", "name" and "reason"; got %r'
+                key, reason, target = (item["file"], item["name"]), item["reason"], item.get("target")
+            except (KeyError, TypeError, AttributeError):
+                raise KeyError('%s: every "layering.exempt" entry needs "file", "name" and "reason" (and may name a "target"); got %r'
                                % (config.file, item))
+            if target is not None and not (isinstance(target, str) and target):
+                raise KeyError('%s: a "layering.exempt" entry\'s "target" is the referenced file\'s path; got %r' % (config.file, item))
+            exempt[key + (None if target is None else os.path.normpath(target),)] = reason
         return Root(os.path.abspath(config.path(root)), exempt)
 
 
@@ -148,18 +181,26 @@ def judge(app, exempt, rules, strict_dead, references_in_app):
     exempt_used = set()
     for path, number, name, target, target_root in references:
         source = os.path.relpath(path, app)
-        if rules.permits(layer_of(source), layer_of(os.path.relpath(target, target_root))):
+        referenced = os.path.relpath(target, target_root)
+        if rules.permits(layer_of(source), layer_of(referenced)):
             continue
-        key = (source, name)
-        if key in exempt:
+        key = exempt_key(exempt, source, name, referenced)
+        if key is not None:
             exempt_used.add(key)
             continue
-        violations.append((source, number, name, os.path.relpath(target, target_root)))
+        violations.append((source, number, name, referenced, rules.undeclared(layer_of(source))))
     dead = sorted(
-        key for key in set(exempt) - exempt_used
-        if strict_dead or os.path.isfile(os.path.join(app, key[0]))
+        (key for key in set(exempt) - exempt_used
+         if strict_dead or os.path.isfile(os.path.join(app, key[0]))),
+        key=lambda key: (key[0], key[1], key[2] or ""),
     )
     return violations, dead, len(references), len(exempt_used)
+
+
+def exempt_key(exempt, source, name, referenced):
+    """The entry covering this reference: one naming its target first, else one without a
+    target (it covers the name wherever it resolves); None when neither is listed."""
+    return next((key for key in ((source, name, referenced), (source, name, None)) if key in exempt), None)
 
 
 def targets_for(args, rules, config):
@@ -226,18 +267,23 @@ def main():
 def print_violations(violations, where, config):
     print("FAIL: %d cross-layer reference(s) the layering does not allow%s." % (len(violations), where))
     print("Layers may depend downward only — see `layering.allowed` in %s." % config.file)
-    for source, number, name, target in violations:
-        print("  %s:%d -> %s (%s)" % (source, number, name, target))
-    print("Move the type to the layer that needs it, inject it, or — on purpose — add the pair to the "
-          "`exempt` list%s of the `layering` section in %s, with the reason." % (where, config.file))
+    for source, number, name, target, undeclared in violations:
+        print("  %s:%d -> %s (%s)%s" % (source, number, name, target,
+              " — layer %r is undeclared: `layering.allowed` does not list it and `unknown_layers` is deny"
+              % layer_of(source) if undeclared else ""))
+    print("Move the type to the layer that needs it, inject it, or — on purpose — add the entry to the "
+          "`exempt` list%s of the `layering` section in %s, with the reason:" % (where, config.file))
+    for source, _number, name, target, _undeclared in violations:
+        print("  " + json.dumps({"file": source, "name": name, "target": target,
+                                  "reason": "why it stands, and what would remove it"}))
 
 
 def print_dead(dead, label, config):
     print("FAIL: %d EXEMPT entr%s in %s%s name%s no violating reference — the reference is gone, so the entry must go too:"
           % (len(dead), "y" if len(dead) == 1 else "ies", config.file,
              " for %s" % label if label else "", "s" if len(dead) == 1 else ""))
-    for source, name in dead:
-        print("  (%r, %r)" % (source, name))
+    for source, name, target in dead:
+        print("  (%r, %r)" % (source, name) if target is None else "  (%r, %r, %r)" % (source, name, target))
 
 
 def print_verdict(violations, dead, judged, exempt_used, label, config, quiet):
