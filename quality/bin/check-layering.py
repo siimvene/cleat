@@ -210,7 +210,7 @@ def place(path, roots):
     real = os.path.realpath(path)
     for root in roots:
         real_root = os.path.realpath(root)
-        if real.startswith(os.path.join(real_root, "")):
+        if real == real_root or real.startswith(os.path.join(real_root, "")):
             return os.path.relpath(real, real_root)
     return None
 

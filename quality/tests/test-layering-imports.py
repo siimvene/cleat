@@ -492,6 +492,28 @@ try:
              {"file": "core/ext", "name": "symlink", "target": "../ext", "reason": "vendored"}]
     code, out = run(kv_config(kv, exempt=links))
     check("symlink: an escaping link is exempted by the link and where it points", code == 0 and "(2 exempt)" in out, out)
+    # ---- sixth pass: a name lookup (exec'd code, a class body binding the name) that
+    # misses goes to the module and builtins, never to an enclosing function's local;
+    # and a directory link to a judged root itself is inside it.
+    kv = os.path.join(tmp, "kv18", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    lookups = {
+        # exec in `inner` cannot see `outer`'s locals (no closure cell): it reads the module.
+        "exec_shadow": ("import importlib\ndef outer():\n    import json as importlib\n    def inner():\n"
+                        "        exec(\"importlib.import_module('kvart.api.auth')\")\n", 5),
+        # f's local is unset when exec runs: the lookup misses it and reads the module.
+        "exec_dead": ("import importlib\ndef f():\n    exec(\"importlib.import_module('kvart.api.auth')\")\n    importlib = None\n", 3),
+        # C binds the name, so the read is a lookup: C, then the module, skipping f.
+        "class_in_function": ("import importlib\ndef f():\n    importlib = None\n    class C:\n"
+                              "        importlib.import_module('kvart.api.auth')\n        importlib = None\n", 5),
+    }
+    for stem, (text, _line) in lookups.items():
+        write(os.path.join(kv, "core", stem + ".py"), text)
+    os.symlink(os.path.join("..", "..", "kvart"), os.path.join(kv, "core", "shared"))
+    code, out = run(kv_config(kv))
+    for stem, (_text, line) in lookups.items():
+        check("lookup: %s is read" % stem, code == 1 and "core/%s.py:%d -> auth (api/auth.py)" % (stem, line) in out, out)
+    check("symlink: a directory link to the judged root itself is inside it", "core/shared" not in out, out)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

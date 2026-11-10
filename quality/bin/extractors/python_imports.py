@@ -427,29 +427,27 @@ def _walk_value(node, scope, on_name, on_member):
 
 def _bindings(name, scope):
     """([(scope, name)] a read of `name` in `scope` may see, whether the builtin may be
-    seen): the owning scope's binding and, when that is a class body or a module — read
-    by name lookup, so a read before the binding runs falls through — the next one out;
-    past the module of exec'd code, the scope that exec'd it."""
-    found = []
+    seen). A function's own binding (or a closure's) is the answer. Anything else is a
+    name lookup — a class body that binds the name, the module, no binding at all —
+    which on a miss goes to the module and then the builtins, never to an enclosing
+    function; for exec'd code, on into the scope that exec'd it (`_looked_up`)."""
+    owner = scope.owner_of(name)
+    if owner is not None and not owner.is_class and owner is not owner.root:
+        return [(owner, name)], False
+    return ([(owner, name)] if owner is not None else []) + _looked_up(name, scope.root), True
+
+
+def _looked_up(name, root):
+    """[(scope, name)] a name lookup that misses reaches from the module `root`: its own
+    binding and, when `root` is exec'd code, every binding along the chain of the scope
+    that exec'd it — its locals, any closure it may hold, its module — and so on out.
+    Which of those the run reads is not knowable from the text, so all of them count."""
+    found, scope = [], root
     while scope is not None:
-        owner = scope.owner_of(name)
-        if owner is not None:
-            found.append((owner, name))
-            if not owner.is_class and owner is not owner.root:
-                return found, False
-        scope = _next_out(owner, scope)
-    return found, True
-
-
-def _next_out(owner, scope):
-    """Where a read that may miss `owner` looks next: past a class body its nearest
-    enclosing non-class scope; past the module, the scope that exec'd it, if any."""
-    if owner is None or not owner.is_class:
-        return scope.root.outer
-    outer = owner.parent
-    while outer.is_class:
-        outer = outer.parent
-    return outer
+        if name in scope.entries:
+            found.append((scope, name))
+        scope = scope.parent if scope.parent is not None else scope.outer
+    return found
 
 
 def _reads(node, scope):
