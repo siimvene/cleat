@@ -132,6 +132,10 @@ def _resolve_python(spec, path, root):
     if spec.startswith("."):
         dots = len(spec) - len(spec.lstrip("."))
         base = os.path.dirname(path)
+        # Deeper than the path itself is deeper than any package: Python raises, so it
+        # names nothing — refused before walking a dirname per dot.
+        if dots - 1 > os.path.abspath(base).count(os.sep):
+            return None
         for _ in range(dots - 1):
             base = os.path.dirname(base)
         rest = spec.lstrip(".").split(".") if spec.lstrip(".") else []

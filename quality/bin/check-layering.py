@@ -38,7 +38,14 @@ a symlink in one layer to a file in another is the other layer, and a symlink
 — source or target — resolving outside every judged root is a violation naming
 the link; that end is printed and keyed (exemption `file` or `target`) by where
 the link really points, relative to the root, so retargeting it retires the
-entry.
+entry. Every source file and directory the walk meets is checked, not only the
+ends of a reference: a source-file link out of every root that imports nothing
+under one, and a directory link out of every root (the walk never descends a
+directory link, so nothing under it would be judged), are each a violation
+named `symlink`, printed at line 0 and keyed by the link (`file`) and where it
+really points (`target`). A directory link that stays inside a judged root is
+not descended either: the files it reaches are judged where they really are,
+by the walk of that directory — as a file link is judged where it points.
 
 How a reference is read (`extractors/references.py`) depends on
 `layering.references`: `identifiers` — the default, for Swift — reads every
@@ -53,10 +60,12 @@ comma lists, semicolons, continuations, `from pkg import name` as the
 submodule `pkg.name` when there is one, and `importlib.import_module` /
 `__import__` / `runpy.run_module` / `exec` of a constant name by any name the
 file binds them to; out of scope: a computed module name, `getattr` with a
-computed attribute, `exec` of a computed string, `runpy.run_path`, walrus-bound
-aliases, star imports from importlib/runpy). A file
+computed attribute, `exec` of a computed string, `runpy.run_path`, aliases
+bound by a walrus, unpacking or a `for`/`with` target, star imports from
+importlib/runpy; a name is the machinery if any of its bindings may be). A file
 the parser refuses is read statement by statement and named on a WARN line —
-a FAIL with `layering.unparseable: "fail"` (default "warn"); `ast-grep` is the identifiers reading through a
+a FAIL with `layering.unparseable: "fail"` (default "warn") — and so is a file
+nesting `exec`/`eval` strings deeper than the reader follows; `ast-grep` is the identifiers reading through a
 parser, for nine languages, needing `ast-grep` installed. For `identifiers`: Comments and string literals are
 stripped first, because prose is not a dependency — a repo's headers name
 types in other layers constantly, and a mention in a comment would make every
@@ -201,7 +210,7 @@ def place(path, roots):
     real = os.path.realpath(path)
     for root in roots:
         real_root = os.path.realpath(root)
-        if real.startswith(os.path.join(real_root, "")):
+        if real == real_root or real.startswith(os.path.join(real_root, "")):
             return os.path.relpath(real, real_root)
     return None
 
@@ -246,7 +255,7 @@ def classify(rules, roots, path, app, target, target_root):
     return source, real, "; ".join(notes)
 
 
-def judge(app, exempt, rules, strict_dead, references_in_app, roots=None):
+def judge(app, exempt, rules, strict_dead, references_in_app, roots=None, links=()):
     """(violations, dead exemptions, judged, exempt used) for the tree at `app`,
     judged against `exempt` — `strict_dead` when a file an entry names but the
     tree lacks still counts as dead (the tree is one of the configured roots,
@@ -254,13 +263,16 @@ def judge(app, exempt, rules, strict_dead, references_in_app, roots=None):
     just a fixture that has no reason to reproduce every file in the list).
     `references_in_app` is what the extractor read: (from file, line, name,
     referenced file, its root). `roots` are the judged roots a file's real location is
-    placed under (default: `app` alone)."""
+    placed under (default: `app` alone); `links` the symlinks under `app` resolving
+    outside every one of them (`escaping_links`)."""
     roots = roots or [app]
     references = references_in_app
+    findings = [(number, name) + classify(rules, roots, path, app, target, target_root)
+                for path, number, name, target, target_root in references]
+    findings += link_findings(app, links, {reference[0] for reference in references})
     violations = []
     exempt_used = set()
-    for path, number, name, target, target_root in references:
-        source, referenced, note = classify(rules, roots, path, app, target, target_root)
+    for number, name, source, referenced, note in findings:
         if referenced is None:
             continue
         key = exempt_key(exempt, source, name, referenced)
@@ -269,6 +281,45 @@ def judge(app, exempt, rules, strict_dead, references_in_app, roots=None):
             continue
         violations.append((source, number, name, referenced, note))
     return violations, dead_entries(app, exempt, exempt_used, strict_dead), len(references), len(exempt_used)
+
+
+def escaping_links(app, roots, skip_dirs, suffixes):
+    """Every symlink under `app` — a directory, or a file ending in one of `suffixes` —
+    resolving outside every judged root, walked as the readers walk: `skip_dirs` pruned,
+    a directory link listed but never descended."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(app):
+        dirnames[:] = sorted(d for d in dirnames if d not in skip_dirs)
+        found += [path for path in walked(dirpath, dirnames, filenames, suffixes) if escapes_roots(path, roots)]
+    return found
+
+
+def walked(dirpath, dirnames, filenames, suffixes):
+    """The directories and source files one step of the walk meets, as paths."""
+    return [os.path.join(dirpath, entry) for entry in dirnames + sorted(f for f in filenames if f.endswith(suffixes))]
+
+
+def escapes_roots(path, roots):
+    """Whether `path` is a symlink resolving outside every judged root."""
+    return os.path.islink(path) and place(path, roots) is None
+
+
+def link_findings(app, links, sources):
+    """(line 0, "symlink", link, where it really points, note) per escaping link no
+    reference already reports — a directory link, whose contents nothing judges, or a
+    source-file link importing nothing under a root. Keyed by the link and its real
+    target, so retargeting the link retires an exemption written for it."""
+    return [(0, "symlink", os.path.relpath(link, app), outside_root(link, app),
+             "the %s symlink %s resolves outside every judged root"
+             % ("directory" if os.path.isdir(link) else "source", os.path.relpath(link, app)))
+            for link in links if link not in sources]
+
+
+def source_suffixes(rules):
+    """The file endings the configured reader reads as sources."""
+    if rules.reader == "identifiers":
+        return rules.extensions
+    return references.SUFFIXES.get(rules.language, rules.extensions)
 
 
 def dead_entries(app, exempt, exempt_used, strict_dead):
@@ -344,7 +395,8 @@ def main():
             print("FAIL: %s" % problem, file=sys.stderr)
             return 2
         failed = print_unparsed(unparsed, app, rules, config) or failed
-        violations, dead, judged, exempt_used = judge(app, exempt, rules, strict_dead, found, owner_roots)
+        links = escaping_links(app, owner_roots, rules.skip_dirs, source_suffixes(rules))
+        violations, dead, judged, exempt_used = judge(app, exempt, rules, strict_dead, found, owner_roots, links)
         failed = print_verdict(violations, dead, judged, exempt_used, label, config, args.quiet) or failed
     return 1 if failed else 0
 
@@ -354,8 +406,8 @@ def print_unparsed(unparsed, app, rules, config):
     the weaker line reader must never pass silently; True when that fails the check."""
     failing = rules.unparseable == "fail"
     for path in unparsed:
-        print("%s: %s does not parse as Python (or cannot be read) — its imports were read statement by statement, "
-              "which can miss some; %s" % ("FAIL" if failing else "WARN", os.path.relpath(path, app),
+        print("%s: %s does not parse as Python (or cannot be read, or nests exec/eval strings deeper than is read) — "
+              "its imports were read only in part, which can miss some; %s" % ("FAIL" if failing else "WARN", os.path.relpath(path, app),
               "`layering.unparseable` is \"fail\" in %s" % config.file if failing
               else "set `layering.unparseable: \"fail\"` in %s to make this a failure" % config.file))
     return failing and bool(unparsed)

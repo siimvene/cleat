@@ -10,7 +10,7 @@ Writes nothing outside a temporary directory.
 
   python3 quality/tests/test-layering-imports.py
 """
-import json, os, shutil, subprocess, sys, tempfile
+import json, os, shutil, subprocess, sys, tempfile, time
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -355,13 +355,16 @@ try:
     os.symlink(os.path.join("..", "..", "outside"), os.path.join(kv, "core", "farlink"))
     write(os.path.join(kv, "core", "evil.py"), "from kvart.core.farlink.far import z\n")
     pinned = {"file": "core/evil.py", "name": "far", "target": "../outside/far.py", "reason": "vendored"}
-    code, out = run(kv_config(kv, exempt=[pinned]))
-    check("symlink: an exemption for an out-of-root link names where it really points", code == 0 and "(1 exempt)" in out, out)
+    # The directory link is a violation of its own: nothing under it is judged as a source.
+    dir_link = {"file": "core/farlink", "name": "symlink", "target": "../outside", "reason": "vendored"}
+    code, out = run(kv_config(kv, exempt=[pinned, dir_link]))
+    check("symlink: an exemption for an out-of-root link names where it really points", code == 0 and "(2 exempt)" in out, out)
     os.remove(os.path.join(kv, "core", "farlink"))
     os.symlink(os.path.join("..", "..", "outside2"), os.path.join(kv, "core", "farlink"))
-    code, out = run(kv_config(kv, exempt=[pinned]))
+    code, out = run(kv_config(kv, exempt=[pinned, dir_link]))
     check("symlink: retargeting the link reports the new target and retires the entry",
-          code == 1 and "core/evil.py:1 -> far (../outside2/far.py)" in out and "('core/evil.py', 'far', '../outside/far.py')" in out, out)
+          code == 1 and "core/evil.py:1 -> far (../outside2/far.py)" in out and "('core/evil.py', 'far', '../outside/far.py')" in out
+          and "core/farlink:0 -> symlink (../outside2)" in out and "('core/farlink', 'symlink', '../outside')" in out, out)
 
     # ---- fourth pass: global / nonlocal bind where Python binds them, a relative
     # __import__ naming only its level, and importlib's own __import__.
@@ -380,12 +383,137 @@ try:
         write(os.path.join(kv, "core", stem + ".py"), text)
     write(os.path.join(kv, "api", "relative.py"), "__import__('', globals(), None, ['auth'], 1)\n")
     code, out = run(kv_config(kv, allowed={"core": [], "api": [], "App": None}))
-    check("global: a module name rebound through `global` is shadowed at module scope", "core/rebound.py" not in out, out)
+    check("global: a `global` rebinding elsewhere does not hide the module binding (fail closed)",
+          code == 1 and "core/rebound.py:5 -> auth (api/auth.py)" in out, out)
     for stem, (_text, line) in fourth.items():
         check("fourth pass: %s is read" % stem, code == 1 and "core/%s.py:%d -> auth (api/auth.py)" % (stem, line) in out, out)
     refs = references.import_references(kv, [kv], "python", set())
     check("dunder: a relative __import__ naming only its level resolves its fromlist entry",
           any(r[0].endswith("api/relative.py") and r[3].endswith("api/auth.py") for r in refs), str(refs))
+    # ---- fifth pass: a name holds whatever any binding may give it (fail closed), the
+    # aliases are solved in bounded time, nonlocal / global bind and evaluate where
+    # Python does, exec nested past the reader is reported, a huge __import__ level is
+    # refused in constant time, and every symlink out of the roots is judged.
+    def timed(config, *args, cap=20):
+        start = time.monotonic()
+        try:
+            proc = subprocess.run([sys.executable, SCRIPT, "--config", config, *args], capture_output=True, text=True, timeout=cap)
+        except subprocess.TimeoutExpired:
+            return None, "killed after %ds" % cap, cap
+        return proc.returncode, proc.stdout + proc.stderr, time.monotonic() - start
+
+    kv = os.path.join(tmp, "kv13", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    unioned = {
+        "dead_rebind": ("import importlib\nif False:\n    importlib = object()\nimportlib.import_module('kvart.api.auth')\n", 4),
+        "del_after": ("import importlib\nimportlib.import_module('kvart.api.auth')\ndel importlib\n", 2),
+        "rebind_after": ("import importlib\nimportlib.import_module('kvart.api.auth')\nimportlib = mod\n", 2),
+        "default_param": ("import importlib\ndef f(il=importlib):\n    il.import_module('kvart.api.auth')\n", 3),
+        "kwonly_default": ("from importlib import import_module\ndef f(*, load=import_module):\n    load('kvart.api.auth')\n", 3),
+        "conditional": ("import importlib\nload = importlib.import_module if fast else slow\nload('kvart.api.auth')\n", 3),
+        # A class body and the module read by name lookup: before the rebinding runs, the
+        # read falls through to the binding outside it — the module, the builtin.
+        "class_before": ("import importlib\nclass C:\n    importlib.import_module('kvart.api.auth')\n    importlib = None\n", 3),
+        "builtin_before": ("exec('from kvart.api.auth import x')\nexec = print\n", 1),
+        # exec'd code reads the names of the scope that exec'd it.
+        "exec_caller": ("import importlib\nexec(\"importlib.import_module('kvart.api.auth')\")\n", 2),
+        "exec_local": ("def f():\n    import importlib as il\n    exec(\"il.import_module('kvart.api.auth')\")\n", 3),
+        # nonlocal binds in the nearest enclosing function that binds the name — outer, not middle.
+        "nonlocal_far": ("def outer():\n    load = None\n    def middle():\n        def inner():\n            nonlocal load\n"
+                         "            from importlib import import_module as load\n        inner()\n    middle()\n"
+                         "    load('kvart.api.auth')\n", 9),
+        # global / nonlocal: the value is read in the scope the assignment sits in.
+        "global_assign": ("def f():\n    import importlib\n    global im\n    im = importlib.import_module\nim('kvart.api.auth')\n", 5),
+        "nonlocal_assign": ("def outer():\n    im = None\n    def inner():\n        import importlib\n        nonlocal im\n"
+                            "        im = importlib.import_module\n    inner()\n    im('kvart.api.auth')\n", 8),
+    }
+    for stem, (text, _line) in unioned.items():
+        write(os.path.join(kv, "core", stem + ".py"), text)
+    write(os.path.join(kv, "core", "plain_param.py"), "import importlib\ndef f(il):\n    il.import_module('kvart.api.auth')\n")
+    code, out = run(kv_config(kv))
+    for stem, (_text, line) in unioned.items():
+        check("fail closed: %s is read" % stem, code == 1 and "core/%s.py:%d -> auth (api/auth.py)" % (stem, line) in out, out)
+    check("fail closed: a parameter without a default still shadows", "core/plain_param.py" not in out, out)
+
+    # Fan-out: three rebindings per name made resolution exponential (3^20 reads).
+    kv = os.path.join(tmp, "kv14", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    write(os.path.join(kv, "core", "walk.py"),
+          "def walk(node):\n    node = node.parent\n    node = node.parent\n    node = node.parent\n    return node.resolve()\n")
+    chain = "import importlib\n" + "".join("x%d = x%d\n" % (i, i + 1) * 3 for i in range(40)) + "x40 = importlib.import_module\nx0('kvart.api.auth')\n"
+    write(os.path.join(kv, "core", "chain.py"), chain)
+    fan_in = "import importlib\n" + "".join("a%d = importlib.import_module\nx = a%d\n" % (i, i) for i in range(3000)) + "x('kvart.api.auth')\n"
+    write(os.path.join(kv, "core", "fan_in.py"), fan_in)
+    code, out, seconds = timed(kv_config(kv))
+    check("fan-out: rebinding fan-out, a long alias chain and a 3000-way fan-in are judged well under 2s (took %.1fs)" % seconds, seconds < 2, out)
+    check("fan-out: the end of the alias chain is still read", code == 1 and "core/chain.py:%d -> auth" % chain.count("\n") in out
+          and "core/walk.py" not in out, out)
+
+    # exec nested past what the reader follows: named, a failure under unparseable: fail.
+    kv = os.path.join(tmp, "kv15", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    deep = shallow = "from kvart.api.auth import x"
+    for depth in range(5):
+        deep = "exec(%r)" % deep
+        shallow = "exec(%r)" % shallow if depth < 2 else shallow
+    write(os.path.join(kv, "core", "deep.py"), deep + "\n")
+    write(os.path.join(kv, "core", "shallow.py"), shallow + "\n")
+    code, out = run(kv_config(kv))
+    check("exec depth: a file nesting exec past the reader is named on a WARN line", "WARN: core/deep.py does not parse" in out, out)
+    check("exec depth: exec nested within the reader is read and not named",
+          code == 1 and "core/shallow.py:1 -> auth" in out and "WARN: core/shallow.py" not in out, out)
+    code, out = run(kv_config(kv, unparseable="fail"))
+    check("exec depth: under unparseable: fail it fails the check", code == 1 and "FAIL: core/deep.py does not parse" in out, out)
+
+    # A relative __import__ level deeper than any package: Python raises, so it names
+    # nothing — and the reader must not build 300M dots or walk 300M dirnames to see it.
+    kv = os.path.join(tmp, "kv16", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    write(os.path.join(kv, "core", "deep_level.py"), "__import__('x', None, None, [], 300000000)\n__import__('', None, None, ['auth'], 3000)\n")
+    code, out, seconds = timed(kv_config(kv))
+    check("dunder level: a level past any package depth is refused in constant time (took %.1fs)" % seconds, code == 0 and seconds < 2, out)
+
+    # Symlinks out of every root are judged where the walk meets them, references or not.
+    kv = os.path.join(tmp, "kv17", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    write(os.path.join(tmp, "kv17", "outside", "lonely.py"), "import json\n")
+    write(os.path.join(tmp, "kv17", "ext", "mod.py"), "from kvart.api.auth import x\n")
+    os.makedirs(os.path.join(kv, "core"))
+    os.symlink(os.path.join("..", "..", "outside", "lonely.py"), os.path.join(kv, "core", "lonely.py"))
+    os.symlink(os.path.join("..", "..", "ext"), os.path.join(kv, "core", "ext"))
+    os.symlink(os.path.join("..", "api"), os.path.join(kv, "core", "apilink"))
+    code, out = run(kv_config(kv))
+    check("symlink: a source-file link out of every root that imports nothing in one is a violation",
+          code == 1 and "core/lonely.py:0 -> symlink (../outside/lonely.py) — the source symlink core/lonely.py resolves outside every judged root" in out, out)
+    check("symlink: a directory link out of every root is a violation, though the walk never descends it",
+          "core/ext:0 -> symlink (../ext) — the directory symlink core/ext resolves outside every judged root" in out, out)
+    check("symlink: a directory link inside the root is not one", "core/apilink" not in out, out)
+    links = [{"file": "core/lonely.py", "name": "symlink", "target": "../outside/lonely.py", "reason": "vendored"},
+             {"file": "core/ext", "name": "symlink", "target": "../ext", "reason": "vendored"}]
+    code, out = run(kv_config(kv, exempt=links))
+    check("symlink: an escaping link is exempted by the link and where it points", code == 0 and "(2 exempt)" in out, out)
+    # ---- sixth pass: a name lookup (exec'd code, a class body binding the name) that
+    # misses goes to the module and builtins, never to an enclosing function's local;
+    # and a directory link to a judged root itself is inside it.
+    kv = os.path.join(tmp, "kv18", "kvart")
+    write(os.path.join(kv, "api", "auth.py"), "x = 1\n")
+    lookups = {
+        # exec in `inner` cannot see `outer`'s locals (no closure cell): it reads the module.
+        "exec_shadow": ("import importlib\ndef outer():\n    import json as importlib\n    def inner():\n"
+                        "        exec(\"importlib.import_module('kvart.api.auth')\")\n", 5),
+        # f's local is unset when exec runs: the lookup misses it and reads the module.
+        "exec_dead": ("import importlib\ndef f():\n    exec(\"importlib.import_module('kvart.api.auth')\")\n    importlib = None\n", 3),
+        # C binds the name, so the read is a lookup: C, then the module, skipping f.
+        "class_in_function": ("import importlib\ndef f():\n    importlib = None\n    class C:\n"
+                              "        importlib.import_module('kvart.api.auth')\n        importlib = None\n", 5),
+    }
+    for stem, (text, _line) in lookups.items():
+        write(os.path.join(kv, "core", stem + ".py"), text)
+    os.symlink(os.path.join("..", "..", "kvart"), os.path.join(kv, "core", "shared"))
+    code, out = run(kv_config(kv))
+    for stem, (_text, line) in lookups.items():
+        check("lookup: %s is read" % stem, code == 1 and "core/%s.py:%d -> auth (api/auth.py)" % (stem, line) in out, out)
+    check("symlink: a directory link to the judged root itself is inside it", "core/shared" not in out, out)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 

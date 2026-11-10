@@ -16,16 +16,26 @@ decodes into a real import line is read as that import. Read are:
   bare name the file imported from importlib/runpy, the builtin `__import__` —
   a method of any other object that shares the name is not an import. Bindings
   are per scope (module, function, lambda, class, comprehension), aliases come
-  from plain, chained and annotated assignments, and a parameter, `del` or other
-  binding of the name in a scope shadows it there (`global` / `nonlocal` bind
-  where Python binds them; `name = None` is a placeholder, not a shadow);
-- `exec` / `eval` of a constant string, by parsing that string.
+  from plain, chained and annotated assignments, a parameter's default, and
+  either side of a conditional or boolean expression; `global` / `nonlocal`
+  bind where Python binds them (`nonlocal`: the nearest enclosing function that
+  binds the name), the value read in the scope the assignment sits in. A name
+  may hold whatever ANY of its bindings in the scope that owns it holds — order
+  and reachability are not read, so a dead `if False:` rebinding, a later `del`
+  or reassignment cannot hide the machinery (fail closed); a name whose every
+  binding there is something else (a parameter without a default, `del`, a
+  plain value) shadows the outer one. Aliases are solved as a fixed point,
+  linear in the bindings, so no fan-out or cycle of them can stall the reader;
+- `exec` / `eval` of a constant string, by parsing that string, whose names read
+  on into the scope that called exec — nested up to
+  EXEC_DEPTH strings deep; a file nesting deeper is reported as not read in full.
 
 Out of scope, by design: a module name computed at run time (an f-string with a
 variable, a name read from config), `getattr` with a computed attribute,
 `exec`/`eval` of a computed string, `runpy.run_path`, import hooks, aliases
-bound by a walrus (`(load := importlib.import_module)`), names a star import
-from importlib/runpy brings in, and comment / CRLF edge cases of the line
+bound by a walrus (`(load := importlib.import_module)`), by unpacking
+(`a, b = importlib, x`) or as a `for` / `with` / `except` target, names a star
+import from importlib/runpy brings in, and comment / CRLF edge cases of the line
 reader (it runs only on files Python cannot parse, which `unparseable: fail`
 refuses anyway). A reader
 that chased those would be an interpreter.
@@ -36,6 +46,7 @@ of each logical line — and reported as unparsed, so the caller can say so.
 """
 
 import ast
+import collections
 import importlib.util
 import io
 import re
@@ -55,25 +66,29 @@ EXEC_DEPTH = 3
 
 def read(path):
     """([(line, candidate specs)], parsed): every import in the file at `path`, and
-    whether the parser read it (False: the line reader did). Raises OSError."""
+    whether it was read in full (False: the line reader read it, or the parser left
+    exec strings nested too deep unread). Raises OSError."""
     with open(path, "rb") as handle:
         data = handle.read()
-    found = parse(data)
+    notes = []
+    found = parse(data, 0, notes)
     if found is not None:
-        return found, True
+        return found, not notes
     return line_imports(decode(data)), False
 
 
-def parse(source, depth=0):
+def parse(source, depth=0, notes=None, outer=None):
     """[(line, candidate specs)] sorted by line, or None when `source` (bytes or str)
-    does not parse."""
+    does not parse. What could not be read in full is appended to `notes`; `outer` is
+    the scope that exec'd `source`, whose bindings it reads on into."""
+    notes = [] if notes is None else notes
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             tree = ast.parse(source)
-        calls = collect(tree)
+        calls = collect(tree, outer)
         found = [item for node in ast.walk(tree) for item in _static_imports(node)]
-        found += [item for call, scope in calls for item in _call_imports(call, scope, depth)]
+        found += [item for call, scope in calls for item in _call_imports(call, scope, depth, notes)]
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
     return sorted(found, key=lambda item: item[0])
@@ -110,37 +125,52 @@ def _static_imports(node):
 # ---------------------------------------------------------------- dynamic imports
 
 SHADOW = ("shadow", None)
-PLACEHOLDER = ("placeholder", None)
-MAX_ALIAS_DEPTH = 20
+EMPTY = frozenset()
+# Every attribute name that is dynamic machinery on one of the modules.
+MEMBERS = {member for members in ALIASABLE.values() for member in members}
+# A relative level no file's package can be that deep: past it, the import is an
+# ImportError at run time, so it names nothing (and the dots are never built).
+MAX_LEVEL = 4096
 
 
 class Scope:
     """One Python scope (module, function, lambda, class, comprehension) and what each
     name is bound to in it: ("module", name), ("function", dynamic kind), ("assign",
-    value expression) or SHADOW — a parameter, a `del`, any other binding. Reading is
-    flow-insensitive: a name with any binding that is not the dynamic machinery is
-    shadowed in its whole scope, as Python makes it local to the whole scope."""
+    value expression, the scope it is evaluated in) or SHADOW — a parameter, a `del`,
+    any other binding. Reading is flow-insensitive and fails closed: a name may hold
+    whatever any of its bindings in the scope that owns it holds, so one binding to the
+    machinery anywhere in that scope makes a call through the name an import."""
 
-    def __init__(self, parent=None, is_class=False, body=()):
-        self.parent, self.is_class = parent, is_class
+    def __init__(self, parent=None, is_class=False, body=(), outer=None):
+        self.parent, self.is_class, self.outer = parent, is_class, outer
         self.root = parent.root if parent else self
-        self.entries = {}
+        self.entries, self.pending = {}, []
+        self.scopes = [] if parent is None else None
+        self.root.scopes.append(self)
         self.globals, self.nonlocals = _declared(body)
 
     def bind(self, name, entry):
         """Record a binding where Python makes it: a `global` name in the module scope, a
-        `nonlocal` one in the enclosing function scope, any other here."""
-        self._home(name).entries.setdefault(name, []).append(entry)
-
-    def _home(self, name):
+        `nonlocal` one once every scope is read (`home_pending`), any other here."""
         if name in self.globals:
-            return self.root
-        if name in self.nonlocals:
-            scope = self.parent
-            while scope is not None and scope.is_class:
-                scope = scope.parent
-            return scope or self.root
-        return self
+            self.root.entries.setdefault(name, []).append(entry)
+        elif name in self.nonlocals:
+            self.pending.append((name, entry))
+        else:
+            self.entries.setdefault(name, []).append(entry)
+
+    def nonlocal_home(self, name):
+        """Where Python binds a `nonlocal name` declared here: the nearest enclosing
+        function scope that binds the name itself — one declaring it nonlocal too passes
+        it on, a class or the module is never it."""
+        scope, nearest = self.parent, None
+        while scope is not None and scope is not self.root:
+            if not scope.is_class:
+                nearest = nearest or scope
+                if name in scope.entries:
+                    return scope
+            scope = scope.parent
+        return nearest or self.root
 
     def owner_of(self, name):
         """The scope whose binding a reference to `name` here sees, else None. A class
@@ -160,6 +190,14 @@ class Scope:
         if name in self.globals:
             return self.root if name in self.root.entries else False
         return self if name in self.entries and name not in self.nonlocals else None
+
+
+def home_pending(root):
+    """Move every binding made through `nonlocal` to the scope Python binds it in —
+    homes found first, from what each scope binds itself, then moved."""
+    homes = [(scope.nonlocal_home(name), name, entry) for scope in root.scopes for name, entry in scope.pending]
+    for home, name, entry in homes:
+        home.entries.setdefault(name, []).append(entry)
 
 
 NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
@@ -214,7 +252,7 @@ def _visit_import_from(node, scope, calls):
 def _assign_target(target, value, scope):
     """Bind a plain-name target to its value expression; any other target is visited."""
     if isinstance(target, ast.Name):
-        scope.bind(target.id, ("assign", value))
+        scope.bind(target.id, ("assign", value, scope))
         return []
     return [(target, scope)]
 
@@ -250,8 +288,13 @@ def _visit_bound_name(node, scope, calls):
 
 
 def _parameters(args):
-    every = args.posonlyargs + args.args + args.kwonlyargs + [a for a in (args.vararg, args.kwarg) if a]
-    return [a.arg for a in every], [a.annotation for a in every if a.annotation]
+    """([(parameter name, its default or None)], annotations): defaults pair with the
+    last positional parameters, and with keyword-only ones one by one."""
+    positional = args.posonlyargs + args.args
+    defaults = [None] * (len(positional) - len(args.defaults)) + args.defaults
+    pairs = list(zip(positional, defaults)) + list(zip(args.kwonlyargs, args.kw_defaults))
+    pairs += [(a, None) for a in (args.vararg, args.kwarg) if a]
+    return [(a.arg, default) for a, default in pairs], [a.annotation for a, _ in pairs if a.annotation]
 
 
 def _outer_parts(node, annotations):
@@ -263,15 +306,16 @@ def _outer_parts(node, annotations):
 
 def _visit_function(node, scope, calls):
     """Decorators, defaults and annotations run in the enclosing scope; parameters and
-    the body are the function's own."""
+    the body are the function's own. A parameter may hold its default, which is
+    evaluated where the def is: `def f(il=importlib)` makes `il` the module."""
     if not isinstance(node, ast.Lambda):
         scope.bind(node.name, SHADOW)
-    names, annotations = _parameters(node.args)
+    params, annotations = _parameters(node.args)
     outer = _outer_parts(node, annotations)
     body = node.body if isinstance(node.body, list) else [node.body]
     inner = Scope(scope, body=body)
-    for name in names:
-        inner.bind(name, SHADOW)
+    for name, default in params:
+        inner.bind(name, SHADOW if default is None else ("assign", default, scope))
     return [(n, scope) for n in outer] + [(n, inner) for n in body]
 
 
@@ -296,59 +340,140 @@ VISITORS = {
 }
 
 
-def collect(tree):
-    """[(call, scope)] for every call in `tree`, with every scope's bindings recorded —
-    iteratively, so a deeply nested expression cannot exhaust the recursion limit."""
-    calls, stack = [], [(tree, Scope())]
+def collect(tree, outer=None):
+    """[(call, scope)] for every call in `tree`, with every scope's bindings recorded and
+    solved — iteratively, so a deeply nested expression cannot exhaust the recursion
+    limit. `outer`: the scope that exec'd this code, read on into past its module."""
+    root = Scope(outer=outer)
+    calls, stack = [], [(tree, root)]
     while stack:
         node, scope = stack.pop()
         stack.extend(VISITORS.get(type(node), _children)(node, scope, calls))
+    home_pending(root)
+    solve(root)
     return calls
 
 
-def resolve(name, scope, depth=0):
-    """What `name` read in `scope` is — ("module", m), ("function", kind) — else None.
-    Every binding the owning scope makes must agree, or the name is shadowed there."""
-    owner = scope.owner_of(name)
-    if owner is None:
-        return ("function", BUILTINS[name]) if name in BUILTINS else None
-    values = {_entry_value(entry, owner, depth) for entry in owner.entries[name]} - {PLACEHOLDER}
-    return values.pop() if len(values) == 1 else None
+# ---------------------------------------------------------------- what a name may hold
+
+def solve(root):
+    """Every binding's possible values, into `root.values` {(scope, name): frozenset}: a
+    fixed point, grown from nothing. Each binding is read once, then again only when a
+    name its value reads grows; a value set only grows and holds at most every module
+    and function there is, so the work is linear in the bindings, whatever cycles or
+    fan-out the aliases make."""
+    values = collections.ChainMap({}, root.outer.root.values) if root.outer else {}
+    work = [((scope, name), entry) for scope in root.scopes for name, entries in scope.entries.items() for entry in entries]
+    readers = _readers(work, values)
+    root.values = values
+    while work:
+        node, entry = work.pop()
+        found = _entry_values(entry, values)
+        if not found <= values[node]:
+            values[node] = values[node] | found
+            work.extend(readers.get(node, ()))
 
 
-def _entry_value(entry, scope, depth):
-    """A binding's value; `name = None` is a placeholder (`_load = None`, later bound to
-    the machinery), which calling could not reach, so it shadows nothing."""
-    if entry[0] != "assign":
-        return None if entry is SHADOW else entry
-    if isinstance(entry[1], ast.Constant) and entry[1].value is None:
-        return PLACEHOLDER
-    return callee_value(entry[1], scope, depth + 1) if depth < MAX_ALIAS_DEPTH else None
+def _readers(work, values):
+    """{(scope, name): the bindings whose value reads it}, every binding's node in
+    `values` starting from nothing."""
+    readers = {}
+    for node, entry in work:
+        values[node] = EMPTY
+        for read in _reads(entry[1], entry[2]) if entry[0] == "assign" else ():
+            readers.setdefault(read, []).append((node, entry))
+    return readers
 
 
-def _member(module_value, attr):
-    """The function `attr` of a module value names, when it is dynamic machinery."""
-    if module_value is None or module_value[0] != "module" or attr not in ALIASABLE.get(module_value[1], ()):
-        return None
-    return ("function", DYNAMIC[attr])
+def _entry_values(entry, values):
+    """What one binding may hold, given what every binding may hold so far."""
+    if entry[0] == "assign":
+        return evaluate(entry[1], entry[2], values)
+    return EMPTY if entry is SHADOW else frozenset([entry])
 
 
-def callee_value(node, scope, depth=0):
-    """What the expression `node` evaluates to, in the terms `resolve` uses: a name, a
-    member of a bound module, or `getattr(<bound module>, "<member>")`."""
-    if isinstance(node, ast.Name):
-        return resolve(node.id, scope, depth)
+def _accessed(node):
+    """(expression, attribute) for `x.attr` and `getattr(x, "attr")`, else (None, None)."""
     if isinstance(node, ast.Attribute):
-        return _member(callee_value(node.value, scope, depth), node.attr)
+        return node.value, node.attr
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2:
-        return _member(callee_value(node.args[0], scope, depth), const_str(node.args[1]))
+        return node.args[0], const_str(node.args[1])
+    return None, None
+
+
+def _alternatives(node):
+    """The expressions a conditional or boolean expression may evaluate to, else None."""
+    if isinstance(node, ast.IfExp):
+        return [node.body, node.orelse]
+    if isinstance(node, ast.BoolOp):
+        return node.values
     return None
 
 
-def callee_kind(func, scope):
-    """The dynamic kind a call of `func` in `scope` is, else None."""
-    value = callee_value(func, scope)
-    return value[1] if value is not None and value[0] == "function" else None
+def _walk_value(node, scope, on_name, on_member):
+    """Fold the expression `node` through the forms a value is read in: a name, a member
+    of the machinery's modules (`x.attr`, `getattr(x, "attr")`), either side of a
+    conditional or boolean expression. Anything else holds nothing."""
+    if isinstance(node, ast.Name):
+        return on_name(node.id, scope)
+    options = _alternatives(node)
+    if options is not None:
+        return frozenset().union(*(_walk_value(n, scope, on_name, on_member) for n in options))
+    target, attr = _accessed(node)
+    if attr not in MEMBERS:
+        return EMPTY
+    return on_member(_walk_value(target, scope, on_name, on_member), attr)
+
+
+def _bindings(name, scope):
+    """([(scope, name)] a read of `name` in `scope` may see, whether the builtin may be
+    seen). A function's own binding (or a closure's) is the answer. Anything else is a
+    name lookup — a class body that binds the name, the module, no binding at all —
+    which on a miss goes to the module and then the builtins, never to an enclosing
+    function; for exec'd code, on into the scope that exec'd it (`_looked_up`)."""
+    owner = scope.owner_of(name)
+    if owner is not None and not owner.is_class and owner is not owner.root:
+        return [(owner, name)], False
+    return ([(owner, name)] if owner is not None else []) + _looked_up(name, scope.root), True
+
+
+def _looked_up(name, root):
+    """[(scope, name)] a name lookup that misses reaches from the module `root`: its own
+    binding and, when `root` is exec'd code, every binding along the chain of the scope
+    that exec'd it — its locals, any closure it may hold, its module — and so on out.
+    Which of those the run reads is not knowable from the text, so all of them count."""
+    found, scope = [], root
+    while scope is not None:
+        if name in scope.entries:
+            found.append((scope, name))
+        scope = scope.parent if scope.parent is not None else scope.outer
+    return found
+
+
+def _reads(node, scope):
+    """The bindings {(scope, name)} the value of `node` in `scope` depends on."""
+    return _walk_value(node, scope, lambda name, where: frozenset(_bindings(name, where)[0]), lambda reads, _attr: reads)
+
+
+def evaluate(node, scope, values):
+    """What the expression `node` may evaluate to: a frozenset of ("module", m) and
+    ("function", kind), read from `values`."""
+    def on_name(name, where):
+        nodes, builtin = _bindings(name, where)
+        found = frozenset().union(*(values.get(n, EMPTY) for n in nodes))
+        return found | frozenset([("function", BUILTINS[name])]) if builtin and name in BUILTINS else found
+    return _walk_value(node, scope, on_name, _members)
+
+
+def _members(found, attr):
+    """The machinery `attr` names on any module in `found`."""
+    return frozenset(("function", DYNAMIC[attr]) for kind, module in found
+                     if kind == "module" and attr in ALIASABLE.get(module, ()))
+
+
+def callee_kinds(func, scope):
+    """Every dynamic kind a call of `func` in `scope` may be, sorted."""
+    return sorted(value[1] for value in evaluate(func, scope, scope.root.values) if value[0] == "function")
 
 
 def _joined(parts):
@@ -375,13 +500,17 @@ def _arg(call, index, keywords):
     return next((k.value for k in call.keywords if k.arg in keywords), None)
 
 
-def _call_imports(call, scope, depth):
-    kind = callee_kind(call.func, scope)
-    name = const_str(_arg(call, 0, NAME_KEYWORDS)) if kind else None
+def _call_imports(call, scope, depth, notes):
+    """[(line, candidate specs)] the call imports, under every kind its callee may be."""
+    return [item for kind in callee_kinds(call.func, scope) for item in _kind_imports(call, kind, scope, depth, notes)]
+
+
+def _kind_imports(call, kind, scope, depth, notes):
+    name = const_str(_arg(call, 0, NAME_KEYWORDS))
     if name is None or (not name and kind != "__import__"):
         return []
     if kind == "exec":
-        return _exec_imports(call.lineno, name, depth)
+        return _exec_imports(call.lineno, name, scope, depth, notes)
     if kind == "__import__":
         return [(call.lineno, specs) for specs in _dunder_specs(call, name)]
     return [(call.lineno, [_absolute(name, const_str(_arg(call, 1, ("package",))))])]
@@ -401,13 +530,20 @@ def _absolute(name, package):
 def _dunder_specs(call, name):
     """Candidate specs per `__import__(name, globals, locals, fromlist, level)`: each
     fromlist entry as a submodule of `name` first, else `name` itself. A relative one
-    may name nothing but its level: `__import__("", fromlist=["x"], level=1)`."""
+    may name nothing but its level: `__import__("", fromlist=["x"], level=1)`. A level
+    past MAX_LEVEL names nothing (Python raises), and its dots are never built."""
     level = _const_int(_arg(call, 4, ("level",)))
-    if not name and not level:
+    if _names_nothing(name, level):
         return []
     base, joiner = "." * level + name, "." if name else ""
     specs = [[base + joiner + entry, base] for entry in _const_strs(_arg(call, 3, ("fromlist",))) if entry and entry != "*"]
     return specs or [[base]]
+
+
+def _names_nothing(name, level):
+    """Whether `__import__(name, level=level)` cannot name a module: no name and no
+    level, or a level deeper than any package (Python raises)."""
+    return level > MAX_LEVEL or not (name or level)
 
 
 def _const_int(node):
@@ -418,10 +554,14 @@ def _const_strs(node):
     return [const_str(e) for e in node.elts] if isinstance(node, (ast.List, ast.Tuple)) else []
 
 
-def _exec_imports(line, code, depth):
-    """The imports in a constant string handed to exec/eval, reported at the call's line."""
-    found = parse(code, depth + 1) if depth < EXEC_DEPTH else None
-    return [(line, specs) for _inner, specs in found or []]
+def _exec_imports(line, code, scope, depth, notes):
+    """The imports in a constant string handed to exec/eval in `scope` — the string reads
+    that scope's names — reported at the call's line. Past EXEC_DEPTH nested strings are
+    not read, and `notes` says so: the file is then reported as not read in full."""
+    if depth >= EXEC_DEPTH:
+        notes.append("exec nested past %d levels" % EXEC_DEPTH)
+        return []
+    return [(line, specs) for _inner, specs in parse(code, depth + 1, notes, scope) or []]
 
 
 # ---------------------------------------------------------------- line reader
